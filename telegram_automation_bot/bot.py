@@ -484,10 +484,6 @@ class AutomationBot:
         text = message.get("text") or message.get("caption") or ""
         url = first_url(strip_bot_mention(text, self.bot_username))
         if not url:
-            self.api.answer_guest_query(
-                guest_query_id,
-                article_result("Send a media link", "Mention me with a media URL and I will download it."),
-            )
             return
 
         if not self.config.cache_chat_id:
