@@ -12,7 +12,7 @@ import sqlite3
 import tempfile
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +26,7 @@ URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 PLACEHOLDER_RE = re.compile(r"\{([^{}]*)\}")
 COMMAND_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 LOG = logging.getLogger("telegram_automation_bot")
+TELEGRAM_MEDIA_GROUP_LIMIT = 10
 
 
 class TelegramAPIError(RuntimeError):
@@ -199,6 +200,43 @@ class TelegramAPI:
             files = {field: (file_path.name, handle)}
             return self.call(method, data=data, files=files, timeout=600)
 
+    def send_photo_album(
+        self,
+        chat_id: int | str,
+        file_paths: tuple[Path, ...],
+        *,
+        caption: str = "",
+        reply_to_message_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        if not 2 <= len(file_paths) <= TELEGRAM_MEDIA_GROUP_LIMIT:
+            raise ValueError("Telegram media groups must contain 2-10 photos")
+
+        self.send_chat_action(chat_id, "upload_photo")
+        data: dict[str, Any] = {
+            "chat_id": str(chat_id),
+            "media": json.dumps(
+                [
+                    {
+                        **({"caption": caption[:1024]} if index == 0 and caption else {}),
+                        "type": "photo",
+                        "media": f"attach://photo{index}",
+                    }
+                    for index, _path in enumerate(file_paths)
+                ]
+            ),
+        }
+        if reply_to_message_id is not None:
+            data["reply_parameters"] = json.dumps(
+                {"message_id": reply_to_message_id, "allow_sending_without_reply": True}
+            )
+
+        with ExitStack() as stack:
+            files = {
+                f"photo{index}": (path.name, stack.enter_context(path.open("rb")))
+                for index, path in enumerate(file_paths)
+            }
+            return self.call("sendMediaGroup", data=data, files=files, timeout=600)
+
     def answer_guest_query(self, guest_query_id: str, result: dict[str, Any]) -> dict[str, Any]:
         return self.call(
             "answerGuestQuery",
@@ -321,8 +359,16 @@ class RPStore:
 
 @dataclass
 class DownloadedMedia:
-    path: Path
+    paths: tuple[Path, ...]
     title: str
+
+    @property
+    def path(self) -> Path:
+        return self.paths[0]
+
+    @property
+    def is_photo_album(self) -> bool:
+        return len(self.paths) > 1 and all(detect_media_kind(path) == "photo" for path in self.paths)
 
 
 class MediaDownloader:
@@ -354,24 +400,51 @@ class MediaDownloader:
             with yt_dlp.YoutubeDL(options) as ydl:
                 info = ydl.extract_info(url, download=True)
 
-            file_path = find_downloaded_file(job_dir)
-            if not file_path:
+            downloaded_files = find_downloaded_files(job_dir)
+            if not downloaded_files:
                 raise RuntimeError("yt-dlp completed without a usable output file")
-            title = str(info.get("title") or file_path.stem) if isinstance(info, dict) else file_path.stem
-            yield DownloadedMedia(path=file_path, title=title)
+            media_paths = select_downloaded_media(downloaded_files)
+            title = str(info.get("title") or media_paths[0].stem) if isinstance(info, dict) else media_paths[0].stem
+            yield DownloadedMedia(paths=media_paths, title=title)
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
 
 
-def find_downloaded_file(directory: Path) -> Path | None:
-    candidates = [
+def find_downloaded_files(directory: Path) -> list[Path]:
+    return [
         path
         for path in directory.rglob("*")
-        if path.is_file() and not path.name.endswith((".part", ".ytdl", ".temp"))
+        if path.is_file()
+        and path.name != "cookies.txt"
+        and not path.name.endswith((".part", ".ytdl", ".temp", ".tmp"))
     ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda path: path.stat().st_size)
+
+
+def select_downloaded_media(paths: list[Path]) -> tuple[Path, ...]:
+    if not paths:
+        return ()
+
+    sorted_paths = tuple(sorted(paths, key=natural_path_key))
+    if len(sorted_paths) > 1 and all(detect_media_kind(path) == "photo" for path in sorted_paths):
+        return sorted_paths
+    return (max(paths, key=lambda path: path.stat().st_size),)
+
+
+def natural_path_key(path: Path) -> list[int | str]:
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
+
+
+def chunk_paths(paths: tuple[Path, ...], size: int) -> list[tuple[Path, ...]]:
+    return [paths[index : index + size] for index in range(0, len(paths), size)]
+
+
+def photo_album_chunks(paths: tuple[Path, ...]) -> list[tuple[Path, ...]]:
+    albums = chunk_paths(paths, TELEGRAM_MEDIA_GROUP_LIMIT)
+    if len(albums) > 1 and len(albums[-1]) == 1:
+        moved = albums[-2][-1:]
+        albums[-2] = albums[-2][:-1]
+        albums[-1] = moved + albums[-1]
+    return albums
 
 
 def detect_media_kind(file_path: Path) -> str:
@@ -567,16 +640,45 @@ class AutomationBot:
         try:
             self.api.send_message(chat_id, "Downloading...", reply_to_message_id=message_id)
             with self.downloader.download(url) as media:
-                self.ensure_size(media.path)
-                self.api.send_media(
-                    chat_id,
-                    media.path,
-                    caption=media.title,
-                    reply_to_message_id=message_id,
-                )
+                self.send_downloaded_media(chat_id, media, reply_to_message_id=message_id)
         except Exception as exc:
             LOG.exception("Download failed")
             self.api.send_message(chat_id, f"Download failed: {exc}", reply_to_message_id=message_id)
+
+    def send_downloaded_media(
+        self,
+        chat_id: int | str,
+        media: DownloadedMedia,
+        *,
+        reply_to_message_id: int | None = None,
+    ) -> None:
+        if media.is_photo_album:
+            for album in photo_album_chunks(media.paths):
+                for path in album:
+                    self.ensure_size(path)
+                if len(album) == 1:
+                    self.api.send_media(
+                        chat_id,
+                        album[0],
+                        caption=media.title,
+                        reply_to_message_id=reply_to_message_id,
+                    )
+                else:
+                    self.api.send_photo_album(
+                        chat_id,
+                        album,
+                        caption=media.title,
+                        reply_to_message_id=reply_to_message_id,
+                    )
+            return
+
+        self.ensure_size(media.path)
+        self.api.send_media(
+            chat_id,
+            media.path,
+            caption=media.title,
+            reply_to_message_id=reply_to_message_id,
+        )
 
     def ensure_size(self, file_path: Path) -> None:
         size = file_path.stat().st_size
