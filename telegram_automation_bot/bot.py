@@ -415,7 +415,13 @@ class MediaDownloader:
             if self.config.ytdlp_cookies_from_browser:
                 options["cookiesfrombrowser"] = tuple(self.config.ytdlp_cookies_from_browser.split(":"))
             with yt_dlp.YoutubeDL(options) as ydl:
-                info = ydl.extract_info(url, download=True)
+                try:
+                    info = ydl.extract_info(url, download=True)
+                except yt_dlp.utils.DownloadError as exc:
+                    if is_tiktok_photo_url(url):
+                        yield self.download_tiktok_photo_post(url, job_dir)
+                        return
+                    raise
 
             downloaded_files = find_downloaded_files(job_dir)
             if not downloaded_files:
@@ -502,10 +508,23 @@ def photo_album_chunks(paths: tuple[Path, ...]) -> list[tuple[Path, ...]]:
 
 
 def is_tiktok_photo_url(url: str) -> bool:
-    return bool(TIKTOK_PHOTO_URL_RE.search(url))
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc.lower()
+    path_parts = [part for part in parsed.path.split("/") if part]
+    return (
+        host in {"tiktok.com", "www.tiktok.com", "m.tiktok.com"}
+        and len(path_parts) >= 3
+        and path_parts[0].startswith("@")
+        and path_parts[1] == "photo"
+        and path_parts[2].isdigit()
+    ) or bool(TIKTOK_PHOTO_URL_RE.search(url))
 
 
 def tiktok_photo_id(url: str) -> str | None:
+    parsed = urllib.parse.urlparse(url)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if len(path_parts) >= 3 and path_parts[1] == "photo" and path_parts[2].isdigit():
+        return path_parts[2]
     match = TIKTOK_PHOTO_URL_RE.search(url)
     return match.group("id") if match else None
 

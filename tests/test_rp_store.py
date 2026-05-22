@@ -10,8 +10,10 @@ from telegram_automation_bot.bot import (
     extract_tiktok_item_struct,
     extract_tiktok_rehydration_data,
     find_downloaded_files,
+    is_tiktok_photo_url,
     photo_album_chunks,
     select_downloaded_media,
+    tiktok_photo_id,
 )
 
 
@@ -142,6 +144,12 @@ class DownloadedMediaTests(unittest.TestCase):
             image_urls,
             ("https://example.test/1.jpeg", "https://example.test/2.jpeg"),
         )
+
+    def test_detects_tiktok_photo_url_with_query_string(self) -> None:
+        url = "https://www.tiktok.com/@ghvst.1/photo/7630229704976502037?_r=1&_t=ZS-96ZiGadoWoO"
+
+        self.assertTrue(is_tiktok_photo_url(url))
+        self.assertEqual(tiktok_photo_id(url), "7630229704976502037")
 
 
 if __name__ == "__main__":
