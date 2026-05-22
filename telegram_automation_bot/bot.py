@@ -12,6 +12,8 @@ import sqlite3
 import tempfile
 import time
 import uuid
+import urllib.parse
+from html import unescape
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,10 +25,20 @@ from dotenv import load_dotenv
 
 
 URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+TIKTOK_PHOTO_URL_RE = re.compile(r"https?://(?:www\.)?tiktok\.com/@[^/\s]+/photo/(?P<id>\d+)", re.IGNORECASE)
 PLACEHOLDER_RE = re.compile(r"\{([^{}]*)\}")
 COMMAND_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 LOG = logging.getLogger("telegram_automation_bot")
 TELEGRAM_MEDIA_GROUP_LIMIT = 10
+TIKTOK_WEB_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "User-Agent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+        "Mobile/15E148 Safari/604.1"
+    ),
+}
 
 
 class TelegramAPIError(RuntimeError):
@@ -375,11 +387,16 @@ class MediaDownloader:
     def __init__(self, config: Config) -> None:
         self.config = config
         config.download_dir.mkdir(parents=True, exist_ok=True)
+        self.session = requests.Session()
 
     @contextmanager
     def download(self, url: str) -> Any:
         job_dir = Path(tempfile.mkdtemp(prefix="job-", dir=self.config.download_dir))
         try:
+            if is_tiktok_photo_url(url):
+                yield self.download_tiktok_photo_post(url, job_dir)
+                return
+
             outtmpl = str(job_dir / "%(title).180B-%(id)s.%(ext)s")
             options = {
                 "format": self.config.ytdlp_format,
@@ -408,6 +425,43 @@ class MediaDownloader:
             yield DownloadedMedia(paths=media_paths, title=title)
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
+
+    def download_tiktok_photo_post(self, url: str, job_dir: Path) -> DownloadedMedia:
+        response = self.session.get(url, headers=TIKTOK_WEB_HEADERS, timeout=30)
+        response.raise_for_status()
+
+        data = extract_tiktok_rehydration_data(response.text)
+        if not data:
+            raise RuntimeError("TikTok photo post did not expose readable page metadata")
+
+        item = extract_tiktok_item_struct(data)
+        image_urls = extract_tiktok_image_urls(item)
+        if not image_urls:
+            raise RuntimeError("TikTok photo post did not expose image URLs")
+
+        title = str(item.get("desc") or f"TikTok photo post {tiktok_photo_id(url) or ''}").strip()
+        paths = tuple(
+            self.download_tiktok_image(image_url, job_dir, index=index, referer=url)
+            for index, image_url in enumerate(image_urls, start=1)
+        )
+        return DownloadedMedia(paths=paths, title=title)
+
+    def download_tiktok_image(self, url: str, job_dir: Path, *, index: int, referer: str) -> Path:
+        response = self.session.get(
+            normalize_url(url),
+            headers={**TIKTOK_WEB_HEADERS, "Referer": referer},
+            stream=True,
+            timeout=60,
+        )
+        response.raise_for_status()
+
+        extension = extension_from_response(url, response.headers.get("Content-Type"))
+        path = job_dir / f"tiktok-photo-{index:03d}{extension}"
+        with path.open("wb") as handle:
+            for chunk in response.iter_content(chunk_size=1024 * 256):
+                if chunk:
+                    handle.write(chunk)
+        return path
 
 
 def find_downloaded_files(directory: Path) -> list[Path]:
@@ -445,6 +499,157 @@ def photo_album_chunks(paths: tuple[Path, ...]) -> list[tuple[Path, ...]]:
         albums[-2] = albums[-2][:-1]
         albums[-1] = moved + albums[-1]
     return albums
+
+
+def is_tiktok_photo_url(url: str) -> bool:
+    return bool(TIKTOK_PHOTO_URL_RE.search(url))
+
+
+def tiktok_photo_id(url: str) -> str | None:
+    match = TIKTOK_PHOTO_URL_RE.search(url)
+    return match.group("id") if match else None
+
+
+def extract_tiktok_rehydration_data(webpage: str) -> dict[str, Any]:
+    for script_id in ("__UNIVERSAL_DATA_FOR_REHYDRATION__", "SIGI_STATE"):
+        match = re.search(
+            rf'<script[^>]+\bid=["\']{re.escape(script_id)}["\'][^>]*>(?P<body>.*?)</script>',
+            webpage,
+            flags=re.DOTALL,
+        )
+        if not match:
+            continue
+        try:
+            data = json.loads(unescape(match.group("body")).strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            if script_id == "__UNIVERSAL_DATA_FOR_REHYDRATION__":
+                scope = data.get("__DEFAULT_SCOPE__")
+                return scope if isinstance(scope, dict) else data
+            return data
+    return {}
+
+
+def extract_tiktok_item_struct(data: dict[str, Any]) -> dict[str, Any]:
+    candidates: list[Any] = [
+        data.get("webapp.video-detail"),
+        data.get("ItemModule"),
+        data,
+    ]
+
+    for candidate in candidates:
+        item = item_struct_from_candidate(candidate)
+        if item:
+            return item
+
+    for value in walk_json(data):
+        item = item_struct_from_candidate(value)
+        if item:
+            return item
+
+    return {}
+
+
+def item_struct_from_candidate(candidate: Any) -> dict[str, Any]:
+    if not isinstance(candidate, dict):
+        return {}
+
+    item = candidate.get("itemInfo", {}).get("itemStruct") if isinstance(candidate.get("itemInfo"), dict) else None
+    if isinstance(item, dict):
+        return item
+
+    item = candidate.get("itemStruct")
+    if isinstance(item, dict):
+        return item
+
+    if "imagePost" in candidate or "image_post_info" in candidate:
+        return candidate
+
+    if candidate and all(isinstance(value, dict) for value in candidate.values()):
+        for value in candidate.values():
+            if "imagePost" in value or "image_post_info" in value:
+                return value
+
+    return {}
+
+
+def extract_tiktok_image_urls(item: dict[str, Any]) -> tuple[str, ...]:
+    image_post = item.get("imagePost") or item.get("image_post_info") or {}
+    if not isinstance(image_post, dict):
+        return ()
+
+    raw_images = image_post.get("images") or image_post.get("image_list") or []
+    urls: list[str] = []
+    for image in raw_images if isinstance(raw_images, list) else []:
+        if not isinstance(image, dict):
+            continue
+        url = first_tiktok_image_url(image)
+        if url and url not in urls:
+            urls.append(url)
+    return tuple(urls)
+
+
+def first_tiktok_image_url(image: dict[str, Any]) -> str | None:
+    preferred_keys = (
+        "imageURL",
+        "image_url",
+        "displayImage",
+        "display_image",
+        "originCover",
+        "origin_cover",
+    )
+    for key in preferred_keys:
+        url = first_url_from_json(image.get(key))
+        if url:
+            return url
+    return first_url_from_json(image)
+
+
+def first_url_from_json(value: Any) -> str | None:
+    if isinstance(value, str) and value.startswith(("http://", "https://", "//")):
+        return value
+    if isinstance(value, list):
+        for item in value:
+            url = first_url_from_json(item)
+            if url:
+                return url
+    if isinstance(value, dict):
+        for key in ("urlList", "url_list", "urls", "UrlList", "src", "url"):
+            url = first_url_from_json(value.get(key))
+            if url:
+                return url
+    return None
+
+
+def walk_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from walk_json(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from walk_json(item)
+
+
+def normalize_url(url: str) -> str:
+    return f"https:{url}" if url.startswith("//") else url
+
+
+def extension_from_response(url: str, content_type: str | None) -> str:
+    parsed_extension = Path(urllib.parse.urlparse(url).path).suffix.lower()
+    if parsed_extension in {".jpg", ".jpeg", ".png", ".webp"}:
+        return parsed_extension
+
+    if content_type:
+        content_type = content_type.split(";", maxsplit=1)[0].strip().lower()
+        if content_type == "image/jpeg":
+            return ".jpg"
+        extension = mimetypes.guess_extension(content_type)
+        if extension in {".jpg", ".jpeg", ".png", ".webp"}:
+            return extension
+
+    return ".jpg"
 
 
 def detect_media_kind(file_path: Path) -> str:
@@ -616,6 +821,19 @@ class AutomationBot:
 
         try:
             with self.downloader.download(url) as media:
+                if media.is_photo_album:
+                    self.api.answer_guest_query(
+                        guest_query_id,
+                        article_result(
+                            "TikTok photo album",
+                            (
+                                f"This TikTok post contains {len(media.paths)} images. "
+                                "Telegram guest replies cannot send albums; send the link in a normal chat with the bot."
+                            ),
+                        ),
+                    )
+                    return
+
                 self.ensure_size(media.path)
                 cached_message = self.api.send_media(
                     self.config.cache_chat_id,

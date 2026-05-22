@@ -6,6 +6,9 @@ from pathlib import Path
 from telegram_automation_bot.bot import (
     RPStore,
     chunk_paths,
+    extract_tiktok_image_urls,
+    extract_tiktok_item_struct,
+    extract_tiktok_rehydration_data,
     find_downloaded_files,
     photo_album_chunks,
     select_downloaded_media,
@@ -104,6 +107,41 @@ class DownloadedMediaTests(unittest.TestCase):
         chunks = photo_album_chunks(paths)
 
         self.assertEqual([len(chunk) for chunk in chunks], [9, 2])
+
+    def test_extracts_tiktok_photo_post_images_from_rehydration_json(self) -> None:
+        webpage = """
+        <html>
+          <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
+          {
+            "__DEFAULT_SCOPE__": {
+              "webapp.video-detail": {
+                "itemInfo": {
+                  "itemStruct": {
+                    "desc": "photo set",
+                    "imagePost": {
+                      "images": [
+                        {"imageURL": {"urlList": ["https://example.test/1.jpeg"]}},
+                        {"imageURL": {"urlList": ["https://example.test/2.jpeg"]}}
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+          </script>
+        </html>
+        """
+
+        data = extract_tiktok_rehydration_data(webpage)
+        item = extract_tiktok_item_struct(data)
+        image_urls = extract_tiktok_image_urls(item)
+
+        self.assertEqual(item["desc"], "photo set")
+        self.assertEqual(
+            image_urls,
+            ("https://example.test/1.jpeg", "https://example.test/2.jpeg"),
+        )
 
 
 if __name__ == "__main__":
