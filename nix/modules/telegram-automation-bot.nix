@@ -20,6 +20,8 @@ let
     ++ optional (cfg.tokenFile != null) "BOT_TOKEN_FILE=${cfg.tokenFile}"
     ++ optional (cfg.token != null) "BOT_TOKEN=${cfg.token}"
     ++ optional (cfg.cacheChatId != null) "TELEGRAM_CACHE_CHAT_ID=${cfg.cacheChatId}"
+    ++ optional (cfg.cookiesFile != null) "YTDLP_COOKIES=${cfg.cookiesFile}"
+    ++ optional (cfg.cookiesFromBrowser != null) "YTDLP_COOKIES_FROM_BROWSER=${cfg.cookiesFromBrowser}"
     ++ lib.mapAttrsToList (name: value: "${name}=${value}") cfg.extraEnvironment;
 in
 {
@@ -109,6 +111,18 @@ in
       type = types.bool;
       default = true;
       description = "Pass noplaylist to yt-dlp to avoid accidental large playlist downloads.";
+    };
+
+    cookiesFile = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "Path to a Netscape cookies.txt file for yt-dlp, useful for YouTube bot checks.";
+    };
+
+    cookiesFromBrowser = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "Browser spec passed to yt-dlp cookies-from-browser, for example firefox or chromium:Profile 1. Usually less suitable for NixOS services than cookiesFile.";
     };
 
     user = mkOption {

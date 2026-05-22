@@ -44,6 +44,8 @@ class Config:
     max_upload_bytes: int
     ytdlp_format: str
     ytdlp_no_playlist: bool
+    ytdlp_cookies: str | None
+    ytdlp_cookies_from_browser: str | None
     poll_timeout: int
 
     @classmethod
@@ -70,6 +72,8 @@ class Config:
             max_upload_bytes=max_upload_mb * 1024 * 1024,
             ytdlp_format=os.getenv("YTDLP_FORMAT", "bv*+ba/best"),
             ytdlp_no_playlist=parse_bool(os.getenv("YTDLP_NO_PLAYLIST", "true")),
+            ytdlp_cookies=empty_to_none(os.getenv("YTDLP_COOKIES")),
+            ytdlp_cookies_from_browser=empty_to_none(os.getenv("YTDLP_COOKIES_FROM_BROWSER")),
             poll_timeout=int(os.getenv("BOT_POLL_TIMEOUT", "50")),
         )
 
@@ -295,6 +299,10 @@ class MediaDownloader:
                 "no_warnings": True,
                 "restrictfilenames": True,
             }
+            if self.config.ytdlp_cookies:
+                options["cookiefile"] = self.config.ytdlp_cookies
+            if self.config.ytdlp_cookies_from_browser:
+                options["cookiesfrombrowser"] = tuple(self.config.ytdlp_cookies_from_browser.split(":"))
             with yt_dlp.YoutubeDL(options) as ydl:
                 info = ydl.extract_info(url, download=True)
 

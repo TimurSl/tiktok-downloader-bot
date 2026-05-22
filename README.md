@@ -249,6 +249,22 @@ NixOS module example:
 
 The module rejects `/nix/store` work and download directories because the bot must write SQLite state and temporary media files at runtime.
 
+### YouTube Bot Checks
+
+If YouTube returns `Sign in to confirm you're not a bot`, export browser cookies to Netscape `cookies.txt` format and point yt-dlp at that file:
+
+```nix
+services.telegram-automation-bot.cookiesFile = "/var/lib/telegram-automation-bot/youtube-cookies.txt";
+```
+
+or in `.env`:
+
+```env
+YTDLP_COOKIES=/var/lib/telegram-automation-bot/youtube-cookies.txt
+```
+
+For a NixOS service, a cookie file is usually more reliable than `cookiesFromBrowser`, because the service user normally cannot read your desktop browser profile.
+
 ### Docker (Production Ready)
 
 ```bash
