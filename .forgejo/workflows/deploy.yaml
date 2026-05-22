@@ -1,0 +1,18 @@
+name: flake-cd-webhook
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  notify:
+    runs-on: docker
+
+    steps:
+      - name: Trigger deployment
+        run: |
+          curl -fsS \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.FLAKE_CD_TOKEN }}" \
+            https://cd.zenisoft.net.ua/flake-cd
