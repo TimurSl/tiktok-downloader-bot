@@ -300,7 +300,10 @@ class MediaDownloader:
                 "restrictfilenames": True,
             }
             if self.config.ytdlp_cookies:
-                options["cookiefile"] = self.config.ytdlp_cookies
+                cookie_copy = job_dir / "cookies.txt"
+                shutil.copyfile(self.config.ytdlp_cookies, cookie_copy)
+                cookie_copy.chmod(0o600)
+                options["cookiefile"] = str(cookie_copy)
             if self.config.ytdlp_cookies_from_browser:
                 options["cookiesfrombrowser"] = tuple(self.config.ytdlp_cookies_from_browser.split(":"))
             with yt_dlp.YoutubeDL(options) as ydl:
