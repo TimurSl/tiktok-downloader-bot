@@ -186,7 +186,68 @@ python bots/simple_bot.py
 
 # Without FFmpeg (sends original audio format)
 python bots/simple_bot_without_ffmpeg.py
+
+# Full automation bot: media downloader, RP commands, guest mode support
+python bots/automation_bot.py
 ```
+
+### Full Automation Bot
+
+`bots/automation_bot.py` is the production implementation added for hosting. It uses the Telegram Bot API directly so it can handle Bot API 10.0 guest updates, including `guest_message` and `answerGuestQuery`.
+
+Features:
+- Downloads media links with `yt-dlp`, uploads the result to Telegram, then deletes the temporary files.
+- Stores per-chat RP commands in SQLite.
+- Supports guest mode media downloads only. Guest messages never execute RP commands.
+- Runs from `nix run .` and has a NixOS service module.
+
+RP examples:
+
+```text
+/rp add hug {actor} hugs {target} {warmly|softly| }
+hug @friend
+```
+
+If the trigger message is a reply, `{target}` becomes the replied user's display name. Otherwise the text after the trigger word is used as the target.
+
+Guest mode note: Telegram guest replies use `answerGuestQuery`, which sends an inline result. Local files cannot be uploaded directly in that call, so set `TELEGRAM_CACHE_CHAT_ID` to a private chat/channel where the bot can upload downloaded files and reuse the returned `file_id`.
+
+### Nix / NixOS
+
+Run locally:
+
+```bash
+BOT_TOKEN=123:token nix run .
+```
+
+NixOS module example:
+
+```nix
+{
+  inputs.telegram-automation-bot.url = "path:/home/melvi/Work/telegram-automation-bot-framework";
+
+  outputs = { self, nixpkgs, telegram-automation-bot, ... }: {
+    nixosConfigurations.host = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        telegram-automation-bot.nixosModules.default
+        {
+          services.telegram-automation-bot = {
+            enable = true;
+            tokenFile = "/run/secrets/telegram-automation-bot-token";
+            workDir = "/var/lib/telegram-automation-bot";
+            downloadDir = "/var/lib/telegram-automation-bot/downloads";
+            databasePath = "/var/lib/telegram-automation-bot/bot.sqlite3";
+            cacheChatId = "-1001234567890";
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+The module rejects `/nix/store` work and download directories because the bot must write SQLite state and temporary media files at runtime.
 
 ### Docker (Production Ready)
 

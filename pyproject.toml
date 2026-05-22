@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-automation-bot"
+version = "1.0.0"
+description = "Telegram media downloader and roleplay automation bot with guest mode support"
+requires-python = ">=3.10"
+dependencies = [
+  "python-dotenv>=1.0.0",
+  "requests>=2.31.0",
+  "yt-dlp>=2023.12.30",
+]
+
+[project.scripts]
+telegram-automation-bot = "telegram_automation_bot.bot:main"
+
+[tool.setuptools.packages.find]
+include = ["telegram_automation_bot*"]
