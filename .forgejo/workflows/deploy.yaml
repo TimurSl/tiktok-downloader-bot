@@ -7,7 +7,7 @@ on:
 
 jobs:
   notify:
-    runs-on: docker
+    runs-on: codeberg-tiny
 
     steps:
       - name: Trigger deployment
