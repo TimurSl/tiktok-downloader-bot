@@ -197,7 +197,7 @@ python bots/automation_bot.py
 
 Features:
 - Downloads media links with `yt-dlp`, uploads the result to Telegram, then deletes the temporary files.
-- Stores per-chat RP commands in SQLite.
+- Stores RP commands globally per Telegram user in SQLite.
 - Supports guest mode media downloads only. Guest messages never execute RP commands.
 - Runs from `nix run .` and has a NixOS service module.
 
@@ -209,6 +209,7 @@ hug @friend
 ```
 
 If the trigger message is a reply, `{target}` becomes the replied user's display name. Otherwise the text after the trigger word is used as the target.
+RP commands belong to the user who added them, not to the chat. Add `hug` once in DM with the bot, then use `hug @friend` in any group or chat where the bot can read your message.
 
 Guest mode note: Telegram guest replies use `answerGuestQuery`, which sends an inline result. Local files cannot be uploaded directly in that call, so set `TELEGRAM_CACHE_CHAT_ID` to a private chat/channel where the bot can upload downloaded files and reuse the returned `file_id`.
 

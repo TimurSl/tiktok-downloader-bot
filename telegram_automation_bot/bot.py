@@ -212,18 +212,64 @@ class RPStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         with self.connect() as db:
-            db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS rp_commands (
-                    chat_id TEXT NOT NULL,
-                    command TEXT NOT NULL,
-                    template TEXT NOT NULL,
-                    created_by INTEGER,
-                    created_at INTEGER NOT NULL,
-                    PRIMARY KEY (chat_id, command)
-                )
-                """
+            self.ensure_schema(db)
+
+    def ensure_schema(self, db: sqlite3.Connection) -> None:
+        cursor = db.execute("PRAGMA table_info(rp_commands)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "chat_id" in columns:
+            self.migrate_from_chat_scoped_commands(db)
+            return
+
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rp_commands (
+                user_id INTEGER NOT NULL,
+                command TEXT NOT NULL,
+                template TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, command)
             )
+            """
+        )
+
+    def migrate_from_chat_scoped_commands(self, db: sqlite3.Connection) -> None:
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rp_commands_user (
+                user_id INTEGER NOT NULL,
+                command TEXT NOT NULL,
+                template TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, command)
+            )
+            """
+        )
+        db.execute(
+            """
+            INSERT INTO rp_commands_user (user_id, command, template, created_at)
+            SELECT created_by, command, template, created_at
+            FROM (
+                SELECT
+                    created_by,
+                    command,
+                    template,
+                    created_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY created_by, command
+                        ORDER BY created_at DESC
+                    ) AS row_number
+                FROM rp_commands
+                WHERE created_by IS NOT NULL
+            )
+            WHERE row_number = 1
+            ON CONFLICT(user_id, command) DO UPDATE SET
+                template = excluded.template,
+                created_at = excluded.created_at
+            """
+        )
+        db.execute("DROP TABLE rp_commands")
+        db.execute("ALTER TABLE rp_commands_user RENAME TO rp_commands")
 
     @contextmanager
     def connect(self) -> Any:
@@ -234,42 +280,41 @@ class RPStore:
         finally:
             db.close()
 
-    def add(self, chat_id: str, command: str, template: str, created_by: int | None) -> None:
+    def add(self, user_id: int, command: str, template: str) -> None:
         with self.connect() as db:
             db.execute(
                 """
-                INSERT INTO rp_commands (chat_id, command, template, created_by, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(chat_id, command) DO UPDATE SET
+                INSERT INTO rp_commands (user_id, command, template, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, command) DO UPDATE SET
                     template = excluded.template,
-                    created_by = excluded.created_by,
                     created_at = excluded.created_at
                 """,
-                (chat_id, command, template, created_by, int(time.time())),
+                (user_id, command, template, int(time.time())),
             )
 
-    def remove(self, chat_id: str, command: str) -> bool:
+    def remove(self, user_id: int, command: str) -> bool:
         with self.connect() as db:
             cursor = db.execute(
-                "DELETE FROM rp_commands WHERE chat_id = ? AND command = ?",
-                (chat_id, command),
+                "DELETE FROM rp_commands WHERE user_id = ? AND command = ?",
+                (user_id, command),
             )
             return cursor.rowcount > 0
 
-    def get(self, chat_id: str, command: str) -> str | None:
+    def get(self, user_id: int, command: str) -> str | None:
         with self.connect() as db:
             cursor = db.execute(
-                "SELECT template FROM rp_commands WHERE chat_id = ? AND command = ?",
-                (chat_id, command),
+                "SELECT template FROM rp_commands WHERE user_id = ? AND command = ?",
+                (user_id, command),
             )
             row = cursor.fetchone()
         return row[0] if row else None
 
-    def list(self, chat_id: str) -> list[tuple[str, str]]:
+    def list(self, user_id: int) -> list[tuple[str, str]]:
         with self.connect() as db:
             cursor = db.execute(
-                "SELECT command, template FROM rp_commands WHERE chat_id = ? ORDER BY command",
-                (chat_id,),
+                "SELECT command, template FROM rp_commands WHERE user_id = ? ORDER BY command",
+                (user_id,),
             )
             return [(row[0], row[1]) for row in cursor.fetchall()]
 
@@ -541,8 +586,16 @@ class AutomationBot:
             raise RuntimeError(f"file is {mb:.1f} MB, max upload is {max_mb:.0f} MB")
 
     def handle_rp_command(self, message: dict[str, Any], text: str) -> None:
-        chat_id = str(message["chat"]["id"])
+        user_id = message_user_id(message)
         reply_to = message.get("message_id")
+        if user_id is None:
+            self.api.send_message(
+                message["chat"]["id"],
+                "RP commands need a Telegram user account.",
+                reply_to_message_id=reply_to,
+            )
+            return
+
         parts = text.split(maxsplit=3)
         action = parts[1].lower() if len(parts) > 1 else "help"
 
@@ -563,8 +616,7 @@ class AutomationBot:
                     reply_to_message_id=reply_to,
                 )
                 return
-            actor_id = (message.get("from") or {}).get("id")
-            self.rp.add(chat_id, command, template, actor_id)
+            self.rp.add(user_id, command, template)
             self.api.send_message(message["chat"]["id"], f"Added RP command: {command}", reply_to_message_id=reply_to)
             return
 
@@ -573,15 +625,19 @@ class AutomationBot:
                 self.api.send_message(message["chat"]["id"], "Usage: /rp remove <command>", reply_to_message_id=reply_to)
                 return
             command = parts[2].lower()
-            removed = self.rp.remove(chat_id, command)
+            removed = self.rp.remove(user_id, command)
             text_out = f"Removed RP command: {command}" if removed else f"No RP command named {command}"
             self.api.send_message(message["chat"]["id"], text_out, reply_to_message_id=reply_to)
             return
 
         if action == "list":
-            commands = self.rp.list(chat_id)
+            commands = self.rp.list(user_id)
             if not commands:
-                self.api.send_message(message["chat"]["id"], "No RP commands in this chat.", reply_to_message_id=reply_to)
+                self.api.send_message(
+                    message["chat"]["id"],
+                    "You have no RP commands.",
+                    reply_to_message_id=reply_to,
+                )
                 return
             lines = ["RP commands:"] + [f"{command}: {template}" for command, template in commands]
             self.api.send_message(message["chat"]["id"], "\n".join(lines), reply_to_message_id=reply_to)
@@ -592,8 +648,11 @@ class AutomationBot:
     def handle_rp_trigger(self, message: dict[str, Any], text: str) -> None:
         if not text.strip():
             return
+        user_id = message_user_id(message)
+        if user_id is None:
+            return
         command, _, target_text = text.strip().partition(" ")
-        template = self.rp.get(str(message["chat"]["id"]), command.lower())
+        template = self.rp.get(user_id, command.lower())
         if template is None:
             return
 
@@ -629,6 +688,11 @@ def strip_bot_mention(text: str, username: str) -> str:
     if not username:
         return text
     return re.sub(rf"@{re.escape(username)}\b", "", text, flags=re.IGNORECASE).strip()
+
+
+def message_user_id(message: dict[str, Any]) -> int | None:
+    user_id = (message.get("from") or {}).get("id")
+    return int(user_id) if user_id is not None else None
 
 
 def display_user(user: dict[str, Any] | None) -> str:
@@ -677,6 +741,7 @@ def rp_help_text() -> str:
             "/rp remove <command>",
             "/rp list",
             "",
+            "Commands are saved globally for your Telegram user and can be used anywhere the bot can read your messages.",
             "Template placeholders: {actor}, {target}, and random choices like {warmly|softly| }.",
             "Trigger with the command word, for example: hug @user, or reply with hug.",
         ]
