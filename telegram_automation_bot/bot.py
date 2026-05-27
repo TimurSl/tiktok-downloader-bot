@@ -30,6 +30,14 @@ PLACEHOLDER_RE = re.compile(r"\{([^{}]*)\}")
 COMMAND_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 LOG = logging.getLogger("telegram_automation_bot")
 TELEGRAM_MEDIA_GROUP_LIMIT = 10
+TIKTOK_HOSTS = {
+    "tiktok.com",
+    "www.tiktok.com",
+    "m.tiktok.com",
+    "vm.tiktok.com",
+    "vt.tiktok.com",
+}
+TIKTOK_SHORT_HOSTS = {"vm.tiktok.com", "vt.tiktok.com"}
 TIKTOK_WEB_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
@@ -393,8 +401,9 @@ class MediaDownloader:
     def download(self, url: str) -> Any:
         job_dir = Path(tempfile.mkdtemp(prefix="job-", dir=self.config.download_dir))
         try:
-            if is_tiktok_photo_url(url):
-                yield self.download_tiktok_photo_post(url, job_dir)
+            download_url = self.resolve_tiktok_url(url)
+            if is_tiktok_photo_url(download_url):
+                yield self.download_tiktok_photo_post(download_url, job_dir)
                 return
 
             outtmpl = str(job_dir / "%(title).180B-%(id)s.%(ext)s")
@@ -416,11 +425,14 @@ class MediaDownloader:
                 options["cookiesfrombrowser"] = tuple(self.config.ytdlp_cookies_from_browser.split(":"))
             with yt_dlp.YoutubeDL(options) as ydl:
                 try:
-                    info = ydl.extract_info(url, download=True)
-                except yt_dlp.utils.DownloadError as exc:
-                    if is_tiktok_photo_url(url):
-                        yield self.download_tiktok_photo_post(url, job_dir)
-                        return
+                    info = ydl.extract_info(download_url, download=True)
+                except yt_dlp.utils.DownloadError:
+                    if is_tiktok_url(download_url):
+                        try:
+                            yield self.download_tiktok_photo_post(download_url, job_dir)
+                            return
+                        except Exception as photo_exc:
+                            LOG.debug("TikTok photo fallback failed for %s: %s", download_url, photo_exc)
                     raise
 
             downloaded_files = find_downloaded_files(job_dir)
@@ -431,6 +443,24 @@ class MediaDownloader:
             yield DownloadedMedia(paths=media_paths, title=title)
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
+
+    def resolve_tiktok_url(self, url: str) -> str:
+        if not is_tiktok_url(url) or not is_tiktok_redirect_url(url):
+            return url
+
+        try:
+            with self.session.get(
+                url,
+                headers=TIKTOK_WEB_HEADERS,
+                allow_redirects=True,
+                stream=True,
+                timeout=30,
+            ) as response:
+                response.raise_for_status()
+                return response.url or url
+        except requests.RequestException as exc:
+            LOG.debug("Could not resolve TikTok redirect URL %s: %s", url, exc)
+            return url
 
     def download_tiktok_photo_post(self, url: str, job_dir: Path) -> DownloadedMedia:
         response = self.session.get(url, headers=TIKTOK_WEB_HEADERS, timeout=30)
@@ -518,6 +548,23 @@ def is_tiktok_photo_url(url: str) -> bool:
         and path_parts[1] == "photo"
         and path_parts[2].isdigit()
     ) or bool(TIKTOK_PHOTO_URL_RE.search(url))
+
+
+def is_tiktok_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc.lower()
+    return host in TIKTOK_HOSTS
+
+
+def is_tiktok_redirect_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc.lower()
+    path_parts = [part for part in parsed.path.split("/") if part]
+    return host in TIKTOK_SHORT_HOSTS or (
+        host in {"tiktok.com", "www.tiktok.com", "m.tiktok.com"}
+        and len(path_parts) >= 2
+        and path_parts[0] == "t"
+    )
 
 
 def tiktok_photo_id(url: str) -> str | None:
@@ -797,8 +844,13 @@ class AutomationBot:
         text = message.get("text") or message.get("caption") or ""
         chat_id = message["chat"]["id"]
         message_id = message.get("message_id")
+        url = first_url(strip_bot_mention(text, self.bot_username))
+        authorized = self.is_authorized(message)
 
-        if not self.is_authorized(message):
+        if not authorized:
+            if url and is_group_chat(message) and not text.lstrip().startswith("/"):
+                self.download_to_chat(message, url)
+                return
             if text.startswith("/"):
                 self.api.send_message(chat_id, "You are not authorized to use this bot.", reply_to_message_id=message_id)
             return
@@ -811,7 +863,6 @@ class AutomationBot:
             self.handle_rp_command(message, text)
             return
 
-        url = first_url(text)
         if url:
             self.download_to_chat(message, url)
             return
@@ -1014,6 +1065,11 @@ class AutomationBot:
             return True
         user_id = (message.get("from") or {}).get("id")
         return user_id in self.config.authorized_users
+
+
+def is_group_chat(message: dict[str, Any]) -> bool:
+    chat_type = (message.get("chat") or {}).get("type")
+    return chat_type in {"group", "supergroup"}
 
 
 def first_url(text: str) -> str | None:

@@ -5,7 +5,8 @@ Production Telegram bot for media downloads and lightweight RP automation.
 ## Features
 
 - Downloads media links with `yt-dlp`, uploads the result to Telegram, then deletes temporary files.
-- Supports TikTok photo posts by sending images as Telegram albums, splitting every 10 images into a new album message.
+- Supports TikTok videos, photo posts, and TikTok short/redirect links. Photo posts are sent as Telegram albums, splitting every 10 images into a new album message.
+- Reacts to media links in groups even when `AUTHORIZED_USER` is set; the allowlist still protects commands and private-chat use.
 - Stores RP commands globally per Telegram user in SQLite.
 - Supports Telegram Bot API guest updates through `guest_message` and `answerGuestQuery`.
 - Runs from `nix run .` and includes a NixOS service module.
@@ -48,6 +49,8 @@ YTDLP_COOKIES_FROM_BROWSER=
 TELEGRAM_CACHE_CHAT_ID=
 LOG_LEVEL=INFO
 ```
+
+Group note: to react to every normal group message, disable BotFather privacy mode for the bot. With privacy mode enabled, Telegram only sends commands, replies, mentions, and service-visible messages to the bot.
 
 Guest mode note: Telegram guest replies use `answerGuestQuery`, which sends an inline result. Local files cannot be uploaded directly in that call, so set `TELEGRAM_CACHE_CHAT_ID` to a private chat/channel where the bot can upload downloaded files and reuse the returned `file_id`. Telegram guest replies cannot send albums; TikTok photo albums must be sent in a normal chat with the bot.
 

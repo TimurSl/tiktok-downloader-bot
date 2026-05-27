@@ -2,15 +2,20 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import MethodType, SimpleNamespace
 
 from telegram_automation_bot.bot import (
+    AutomationBot,
     RPStore,
     chunk_paths,
     extract_tiktok_image_urls,
     extract_tiktok_item_struct,
     extract_tiktok_rehydration_data,
     find_downloaded_files,
+    is_group_chat,
     is_tiktok_photo_url,
+    is_tiktok_redirect_url,
+    is_tiktok_url,
     photo_album_chunks,
     select_downloaded_media,
     tiktok_photo_id,
@@ -150,6 +155,80 @@ class DownloadedMediaTests(unittest.TestCase):
 
         self.assertTrue(is_tiktok_photo_url(url))
         self.assertEqual(tiktok_photo_id(url), "7630229704976502037")
+
+    def test_detects_tiktok_redirect_urls(self) -> None:
+        self.assertTrue(is_tiktok_url("https://vm.tiktok.com/ZMh123/"))
+        self.assertTrue(is_tiktok_url("https://vt.tiktok.com/ZMh123/"))
+        self.assertTrue(is_tiktok_redirect_url("https://www.tiktok.com/t/ZMh123/"))
+        self.assertFalse(is_tiktok_redirect_url("https://www.tiktok.com/@user/video/123"))
+
+
+class MessageHandlingTests(unittest.TestCase):
+    def test_group_media_links_bypass_user_allowlist(self) -> None:
+        bot = AutomationBot.__new__(AutomationBot)
+        bot.config = SimpleNamespace(authorized_users=frozenset({100}))
+        bot.bot_username = "media_bot"
+        bot.api = SimpleNamespace(send_message=lambda *args, **kwargs: None)
+        downloads: list[str] = []
+
+        def download_to_chat(self: AutomationBot, message: dict[str, object], url: str) -> None:
+            downloads.append(url)
+
+        bot.download_to_chat = MethodType(download_to_chat, bot)
+        bot.handle_message(
+            {
+                "text": "@media_bot https://vm.tiktok.com/ZMh123/",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 200},
+                "message_id": 10,
+            }
+        )
+
+        self.assertEqual(downloads, ["https://vm.tiktok.com/ZMh123/"])
+
+    def test_private_media_links_still_require_allowlist(self) -> None:
+        bot = AutomationBot.__new__(AutomationBot)
+        bot.config = SimpleNamespace(authorized_users=frozenset({100}))
+        bot.bot_username = "media_bot"
+        bot.api = SimpleNamespace(send_message=lambda *args, **kwargs: None)
+        downloads: list[str] = []
+        bot.download_to_chat = MethodType(lambda _self, _message, url: downloads.append(url), bot)
+
+        bot.handle_message(
+            {
+                "text": "https://vm.tiktok.com/ZMh123/",
+                "chat": {"id": 200, "type": "private"},
+                "from": {"id": 200},
+                "message_id": 10,
+            }
+        )
+
+        self.assertEqual(downloads, [])
+
+    def test_rp_commands_with_urls_are_not_treated_as_downloads(self) -> None:
+        bot = AutomationBot.__new__(AutomationBot)
+        bot.config = SimpleNamespace(authorized_users=frozenset({100}))
+        bot.bot_username = "media_bot"
+        bot.api = SimpleNamespace(send_message=lambda *args, **kwargs: None)
+        calls: list[str] = []
+        bot.download_to_chat = MethodType(lambda _self, _message, url: calls.append(f"download:{url}"), bot)
+        bot.handle_rp_command = MethodType(lambda _self, _message, text: calls.append(f"rp:{text}"), bot)
+
+        bot.handle_message(
+            {
+                "text": "/rp add share {actor} shares https://example.test",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 100},
+                "message_id": 10,
+            }
+        )
+
+        self.assertEqual(calls, ["rp:/rp add share {actor} shares https://example.test"])
+
+    def test_group_chat_detection(self) -> None:
+        self.assertTrue(is_group_chat({"chat": {"type": "group"}}))
+        self.assertTrue(is_group_chat({"chat": {"type": "supergroup"}}))
+        self.assertFalse(is_group_chat({"chat": {"type": "private"}}))
 
 
 if __name__ == "__main__":
