@@ -1,5 +1,6 @@
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -7,8 +8,13 @@ from types import MethodType, SimpleNamespace
 from telegram_automation_bot.bot import (
     AutomationBot,
     PUBLIC_BOT_API_UPLOAD_LIMIT_BYTES,
+    PendingDownload,
+    QualityOption,
     RPStore,
+    best_audio_format,
+    best_video_format,
     chunk_paths,
+    combined_format_size,
     effective_upload_limit_bytes,
     extract_tiktok_image_urls,
     extract_tiktok_item_struct,
@@ -18,7 +24,10 @@ from telegram_automation_bot.bot import (
     is_tiktok_photo_url,
     is_tiktok_redirect_url,
     is_tiktok_url,
+    is_youtube_url,
     photo_album_chunks,
+    quality_format_selector,
+    quality_keyboard,
     select_downloaded_media,
     tiktok_photo_id,
 )
@@ -231,6 +240,99 @@ class MessageHandlingTests(unittest.TestCase):
         self.assertTrue(is_group_chat({"chat": {"type": "group"}}))
         self.assertTrue(is_group_chat({"chat": {"type": "supergroup"}}))
         self.assertFalse(is_group_chat({"chat": {"type": "private"}}))
+
+
+class YouTubeQualityTests(unittest.TestCase):
+    def test_detects_youtube_urls(self) -> None:
+        self.assertTrue(is_youtube_url("https://www.youtube.com/watch?v=abc"))
+        self.assertTrue(is_youtube_url("https://youtu.be/abc"))
+        self.assertFalse(is_youtube_url("https://example.test/watch?v=abc"))
+
+    def test_quality_keyboard_uses_callback_data(self) -> None:
+        keyboard = quality_keyboard(
+            "abc123",
+            [
+                QualityOption("auto", "Auto", None),
+                QualityOption("h720", "720p ~80 MB", quality_format_selector(720)),
+            ],
+        )
+
+        self.assertEqual(
+            keyboard,
+            {
+                "inline_keyboard": [
+                    [{"text": "Auto", "callback_data": "dlq:abc123:auto"}],
+                    [{"text": "720p ~80 MB", "callback_data": "dlq:abc123:h720"}],
+                ]
+            },
+        )
+
+    def test_estimates_merged_video_and_audio_size(self) -> None:
+        formats = [
+            {"format_id": "18", "height": 360, "vcodec": "avc1", "acodec": "mp4a", "filesize": 12},
+            {"format_id": "136", "height": 720, "vcodec": "avc1", "acodec": "none", "filesize": 100},
+            {"format_id": "140", "vcodec": "none", "acodec": "mp4a", "filesize": 20, "abr": 128},
+        ]
+
+        video = best_video_format(formats, max_height=720)
+        audio = best_audio_format(formats)
+
+        self.assertEqual(video["format_id"], "136")
+        self.assertEqual(audio["format_id"], "140")
+        self.assertEqual(combined_format_size(video, audio, 120), 120)
+
+    def test_callback_downloads_selected_quality(self) -> None:
+        bot = AutomationBot.__new__(AutomationBot)
+        bot.config = SimpleNamespace(authorized_users=frozenset())
+        bot.bot_username = "media_bot"
+        bot.pending_downloads = {
+            "token": PendingDownload(
+                url="https://www.youtube.com/watch?v=abc",
+                chat_id=-100,
+                reply_to_message_id=10,
+                requester_id=200,
+                created_at=time.time(),
+                options={
+                    "h720": QualityOption("h720", "720p ~80 MB", quality_format_selector(720)),
+                },
+            )
+        }
+        bot.api = FakeTelegramAPI()
+        calls: list[tuple[int, str, int | None, str | None]] = []
+        bot.download_to_chat_url = MethodType(
+            lambda _self, chat_id, url, *, reply_to_message_id=None, format_selector=None: calls.append(
+                (chat_id, url, reply_to_message_id, format_selector)
+            ),
+            bot,
+        )
+
+        bot.handle_callback_query(
+            {
+                "id": "callback-id",
+                "from": {"id": 200},
+                "data": "dlq:token:h720",
+                "message": {"message_id": 99, "chat": {"id": -100}},
+            }
+        )
+
+        self.assertEqual(calls, [(-100, "https://www.youtube.com/watch?v=abc", 10, quality_format_selector(720))])
+        self.assertNotIn("token", bot.pending_downloads)
+        self.assertEqual(bot.api.callback_answers, [("callback-id", "Downloading 720p ~80 MB...")])
+        self.assertEqual(bot.api.edits, [(-100, 99, "Downloading 720p ~80 MB...")])
+
+
+class FakeTelegramAPI:
+    def __init__(self) -> None:
+        self.callback_answers: list[tuple[str, str]] = []
+        self.edits: list[tuple[int, int, str]] = []
+
+    def answer_callback_query(self, callback_query_id: str, text: str = "") -> bool:
+        self.callback_answers.append((callback_query_id, text))
+        return True
+
+    def edit_message_text(self, chat_id: int, message_id: int, text: str, **_kwargs: object) -> bool:
+        self.edits.append((chat_id, message_id, text))
+        return True
 
 
 class UploadLimitTests(unittest.TestCase):

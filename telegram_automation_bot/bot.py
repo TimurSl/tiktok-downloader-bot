@@ -39,6 +39,15 @@ TIKTOK_HOSTS = {
     "vt.tiktok.com",
 }
 TIKTOK_SHORT_HOSTS = {"vm.tiktok.com", "vt.tiktok.com"}
+YOUTUBE_HOSTS = {
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtu.be",
+}
+YOUTUBE_QUALITY_HEIGHTS = (1080, 720, 480, 360)
+PENDING_DOWNLOAD_TTL_SECONDS = 15 * 60
 TIKTOK_WEB_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
@@ -164,7 +173,7 @@ class TelegramAPI:
     def get_updates(self, offset: int | None) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {
             "timeout": self.config.poll_timeout,
-            "allowed_updates": ["message", "guest_message"],
+            "allowed_updates": ["message", "callback_query", "guest_message"],
         }
         if offset is not None:
             payload["offset"] = offset
@@ -176,6 +185,7 @@ class TelegramAPI:
         text: str,
         *,
         reply_to_message_id: int | None = None,
+        reply_markup: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if reply_to_message_id is not None:
@@ -183,7 +193,32 @@ class TelegramAPI:
                 "message_id": reply_to_message_id,
                 "allow_sending_without_reply": True,
             }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
         return self.call("sendMessage", payload=payload)
+
+    def edit_message_text(
+        self,
+        chat_id: int | str,
+        message_id: int,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | bool:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return self.call("editMessageText", payload=payload)
+
+    def answer_callback_query(self, callback_query_id: str, text: str = "") -> bool:
+        payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text[:200]
+        return self.call("answerCallbackQuery", payload=payload, timeout=20)
 
     def send_chat_action(self, chat_id: int | str, action: str) -> None:
         try:
@@ -392,6 +427,24 @@ class DownloadedMedia:
         return len(self.paths) > 1 and all(detect_media_kind(path) == "photo" for path in self.paths)
 
 
+@dataclass(frozen=True)
+class QualityOption:
+    key: str
+    label: str
+    format_selector: str | None
+    approx_bytes: int | None = None
+
+
+@dataclass(frozen=True)
+class PendingDownload:
+    url: str
+    chat_id: int | str
+    reply_to_message_id: int | None
+    requester_id: int | None
+    created_at: float
+    options: dict[str, QualityOption]
+
+
 class MediaDownloader:
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -399,7 +452,7 @@ class MediaDownloader:
         self.session = requests.Session()
 
     @contextmanager
-    def download(self, url: str) -> Any:
+    def download(self, url: str, *, format_selector: str | None = None) -> Any:
         job_dir = Path(tempfile.mkdtemp(prefix="job-", dir=self.config.download_dir))
         try:
             download_url = self.resolve_tiktok_url(url)
@@ -409,7 +462,7 @@ class MediaDownloader:
 
             outtmpl = str(job_dir / "%(title).180B-%(id)s.%(ext)s")
             options = {
-                "format": self.config.ytdlp_format,
+                "format": format_selector or self.config.ytdlp_format,
                 "outtmpl": outtmpl,
                 "merge_output_format": "mp4",
                 "noplaylist": self.config.ytdlp_no_playlist,
@@ -444,6 +497,53 @@ class MediaDownloader:
             yield DownloadedMedia(paths=media_paths, title=title)
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
+
+    def youtube_quality_options(self, url: str) -> list[QualityOption]:
+        options = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": self.config.ytdlp_no_playlist,
+            "skip_download": True,
+        }
+        if self.config.ytdlp_cookies:
+            options["cookiefile"] = self.config.ytdlp_cookies
+        if self.config.ytdlp_cookies_from_browser:
+            options["cookiesfrombrowser"] = tuple(self.config.ytdlp_cookies_from_browser.split(":"))
+
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        formats = info.get("formats") if isinstance(info, dict) else None
+        if not isinstance(formats, list):
+            formats = []
+        duration = float(info.get("duration") or 0) if isinstance(info, dict) else 0.0
+        audio = best_audio_format(formats)
+
+        choices: list[QualityOption] = [
+            QualityOption("auto", "Auto", None),
+        ]
+        seen_heights: set[int] = set()
+        for height in YOUTUBE_QUALITY_HEIGHTS:
+            video = best_video_format(formats, max_height=height)
+            if not video:
+                continue
+            selected_height = int(video.get("height") or height)
+            if selected_height in seen_heights:
+                continue
+            seen_heights.add(selected_height)
+            approx_bytes = combined_format_size(video, audio, duration)
+            label = f"{selected_height}p"
+            if approx_bytes:
+                label = f"{label} ~{format_bytes(approx_bytes)}"
+            choices.append(
+                QualityOption(
+                    key=f"h{selected_height}",
+                    label=label,
+                    format_selector=quality_format_selector(selected_height),
+                    approx_bytes=approx_bytes,
+                )
+            )
+        return choices
 
     def resolve_tiktok_url(self, url: str) -> str:
         if not is_tiktok_url(url) or not is_tiktok_redirect_url(url):
@@ -536,6 +636,96 @@ def photo_album_chunks(paths: tuple[Path, ...]) -> list[tuple[Path, ...]]:
         albums[-2] = albums[-2][:-1]
         albums[-1] = moved + albums[-1]
     return albums
+
+
+def quality_keyboard(token: str, options: list[QualityOption]) -> dict[str, Any]:
+    rows: list[list[dict[str, str]]] = []
+    for option in options:
+        rows.append(
+            [
+                {
+                    "text": option.label,
+                    "callback_data": f"dlq:{token}:{option.key}",
+                }
+            ]
+        )
+    return {"inline_keyboard": rows}
+
+
+def quality_format_selector(height: int) -> str:
+    return f"bv*[height<={height}]+ba/b[height<={height}]/best"
+
+
+def best_video_format(formats: list[Any], *, max_height: int) -> dict[str, Any] | None:
+    videos = [
+        fmt
+        for fmt in formats
+        if isinstance(fmt, dict)
+        and fmt.get("vcodec") not in {None, "none"}
+        and fmt.get("height")
+        and int(fmt["height"]) <= max_height
+        and not is_storyboard_format(fmt)
+    ]
+    if not videos:
+        return None
+    return max(videos, key=lambda fmt: (int(fmt.get("height") or 0), float(fmt.get("tbr") or 0)))
+
+
+def best_audio_format(formats: list[Any]) -> dict[str, Any] | None:
+    audios = [
+        fmt
+        for fmt in formats
+        if isinstance(fmt, dict)
+        and fmt.get("acodec") not in {None, "none"}
+        and fmt.get("vcodec") in {None, "none"}
+    ]
+    if not audios:
+        return None
+    return max(audios, key=lambda fmt: float(fmt.get("abr") or fmt.get("tbr") or 0))
+
+
+def is_storyboard_format(fmt: dict[str, Any]) -> bool:
+    protocol = str(fmt.get("protocol") or "").lower()
+    format_note = str(fmt.get("format_note") or "").lower()
+    return "storyboard" in protocol or "storyboard" in format_note
+
+
+def combined_format_size(
+    video: dict[str, Any],
+    audio: dict[str, Any] | None,
+    duration_seconds: float,
+) -> int | None:
+    video_size = format_size_bytes(video, duration_seconds)
+    audio_size = format_size_bytes(audio, duration_seconds) if audio else None
+    if video_size and audio_size and video.get("acodec") in {None, "none"}:
+        return video_size + audio_size
+    return video_size or audio_size
+
+
+def format_size_bytes(fmt: dict[str, Any] | None, duration_seconds: float) -> int | None:
+    if not fmt:
+        return None
+    for key in ("filesize", "filesize_approx"):
+        value = fmt.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return int(value)
+    bitrate_kbps = fmt.get("tbr") or fmt.get("vbr") or fmt.get("abr")
+    if isinstance(bitrate_kbps, (int, float)) and bitrate_kbps > 0 and duration_seconds > 0:
+        return int(duration_seconds * bitrate_kbps * 1000 / 8)
+    return None
+
+
+def format_bytes(size: int) -> str:
+    mb = size / 1024 / 1024
+    if mb < 1024:
+        return f"{mb:.0f} MB"
+    return f"{mb / 1024:.1f} GB"
+
+
+def is_youtube_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc.lower()
+    return host in YOUTUBE_HOSTS or host.endswith(".youtube.com")
 
 
 def is_tiktok_photo_url(url: str) -> bool:
@@ -811,6 +1001,7 @@ class AutomationBot:
         self.downloader = MediaDownloader(config)
         self.running = True
         self.bot_username = ""
+        self.pending_downloads: dict[str, PendingDownload] = {}
 
     def run(self) -> None:
         me = self.api.call("getMe")
@@ -838,6 +1029,8 @@ class AutomationBot:
     def handle_update(self, update: dict[str, Any]) -> None:
         if "guest_message" in update:
             self.handle_guest_message(update["guest_message"])
+        elif "callback_query" in update:
+            self.handle_callback_query(update["callback_query"])
         elif "message" in update:
             self.handle_message(update["message"])
 
@@ -850,7 +1043,7 @@ class AutomationBot:
 
         if not authorized:
             if url and is_group_chat(message) and not text.lstrip().startswith("/"):
-                self.download_to_chat(message, url)
+                self.prepare_download_to_chat(message, url)
                 return
             if text.startswith("/"):
                 self.api.send_message(chat_id, "You are not authorized to use this bot.", reply_to_message_id=message_id)
@@ -865,10 +1058,88 @@ class AutomationBot:
             return
 
         if url:
-            self.download_to_chat(message, url)
+            self.prepare_download_to_chat(message, url)
             return
 
         self.handle_rp_trigger(message, text)
+
+    def prepare_download_to_chat(self, message: dict[str, Any], url: str) -> None:
+        if is_youtube_url(url):
+            self.prompt_youtube_quality(message, url)
+            return
+        self.download_to_chat(message, url)
+
+    def prompt_youtube_quality(self, message: dict[str, Any], url: str) -> None:
+        chat_id = message["chat"]["id"]
+        message_id = message.get("message_id")
+        try:
+            options = self.downloader.youtube_quality_options(url)
+            token = uuid.uuid4().hex[:12]
+            self.pending_downloads[token] = PendingDownload(
+                url=url,
+                chat_id=chat_id,
+                reply_to_message_id=message_id,
+                requester_id=message_user_id(message),
+                created_at=time.time(),
+                options={option.key: option for option in options},
+            )
+            self.prune_pending_downloads()
+            self.api.send_message(
+                chat_id,
+                "Choose YouTube quality:",
+                reply_to_message_id=message_id,
+                reply_markup=quality_keyboard(token, options),
+            )
+        except Exception as exc:
+            LOG.exception("Could not prepare YouTube quality choices")
+            self.api.send_message(chat_id, f"Could not read YouTube qualities: {exc}", reply_to_message_id=message_id)
+
+    def handle_callback_query(self, callback_query: dict[str, Any]) -> None:
+        callback_id = str(callback_query.get("id") or "")
+        data = str(callback_query.get("data") or "")
+        if not data.startswith("dlq:"):
+            if callback_id:
+                self.api.answer_callback_query(callback_id)
+            return
+
+        _prefix, token, option_key = data.split(":", maxsplit=2) if data.count(":") >= 2 else ("", "", "")
+        pending = self.pending_downloads.get(token)
+        callback_user_id = message_user_id(callback_query)
+        if not pending or time.time() - pending.created_at > PENDING_DOWNLOAD_TTL_SECONDS:
+            if callback_id:
+                self.api.answer_callback_query(callback_id, "This download choice expired.")
+            self.pending_downloads.pop(token, None)
+            return
+        if pending.requester_id is not None and callback_user_id != pending.requester_id:
+            if callback_id:
+                self.api.answer_callback_query(callback_id, "Only the requester can choose this download.")
+            return
+
+        option = pending.options.get(option_key)
+        if not option:
+            if callback_id:
+                self.api.answer_callback_query(callback_id, "Unknown quality choice.")
+            return
+
+        self.pending_downloads.pop(token, None)
+        if callback_id:
+            self.api.answer_callback_query(callback_id, f"Downloading {option.label}...")
+
+        message = callback_query.get("message") or {}
+        edit_chat_id = (message.get("chat") or {}).get("id")
+        edit_message_id = message.get("message_id")
+        if edit_chat_id is not None and edit_message_id is not None:
+            try:
+                self.api.edit_message_text(edit_chat_id, int(edit_message_id), f"Downloading {option.label}...")
+            except TelegramAPIError as exc:
+                LOG.debug("Could not edit quality prompt: %s", exc)
+
+        self.download_to_chat_url(
+            pending.chat_id,
+            pending.url,
+            reply_to_message_id=pending.reply_to_message_id,
+            format_selector=option.format_selector,
+        )
 
     def handle_guest_message(self, message: dict[str, Any]) -> None:
         guest_query_id = message.get("guest_query_id")
@@ -926,13 +1197,29 @@ class AutomationBot:
     def download_to_chat(self, message: dict[str, Any], url: str) -> None:
         chat_id = message["chat"]["id"]
         message_id = message.get("message_id")
+        self.download_to_chat_url(chat_id, url, reply_to_message_id=message_id)
+
+    def download_to_chat_url(
+        self,
+        chat_id: int | str,
+        url: str,
+        *,
+        reply_to_message_id: int | None = None,
+        format_selector: str | None = None,
+    ) -> None:
         try:
-            self.api.send_message(chat_id, "Downloading...", reply_to_message_id=message_id)
-            with self.downloader.download(url) as media:
-                self.send_downloaded_media(chat_id, media, reply_to_message_id=message_id)
+            self.api.send_message(chat_id, "Downloading...", reply_to_message_id=reply_to_message_id)
+            with self.downloader.download(url, format_selector=format_selector) as media:
+                self.send_downloaded_media(chat_id, media, reply_to_message_id=reply_to_message_id)
         except Exception as exc:
             LOG.exception("Download failed")
-            self.api.send_message(chat_id, f"Download failed: {exc}", reply_to_message_id=message_id)
+            self.api.send_message(chat_id, f"Download failed: {exc}", reply_to_message_id=reply_to_message_id)
+
+    def prune_pending_downloads(self) -> None:
+        cutoff = time.time() - PENDING_DOWNLOAD_TTL_SECONDS
+        for token, pending in list(self.pending_downloads.items()):
+            if pending.created_at < cutoff:
+                self.pending_downloads.pop(token, None)
 
     def send_downloaded_media(
         self,
