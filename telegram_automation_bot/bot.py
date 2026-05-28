@@ -214,6 +214,13 @@ class TelegramAPI:
             payload["reply_markup"] = reply_markup
         return self.call("editMessageText", payload=payload)
 
+    def delete_message(self, chat_id: int | str, message_id: int) -> bool:
+        try:
+            return self.call("deleteMessage", payload={"chat_id": chat_id, "message_id": message_id})
+        except TelegramAPIError as exc:
+            LOG.debug("deleteMessage failed: %s", exc)
+            return False
+
     def answer_callback_query(self, callback_query_id: str, text: str = "") -> bool:
         payload: dict[str, Any] = {"callback_query_id": callback_query_id}
         if text:
@@ -1144,6 +1151,7 @@ class AutomationBot:
             pending.url,
             reply_to_message_id=pending.reply_to_message_id,
             format_selector=option.format_selector,
+            cleanup_message_ids=[int(edit_message_id)] if edit_message_id is not None else None,
         )
 
     def handle_guest_message(self, message: dict[str, Any]) -> None:
@@ -1211,13 +1219,26 @@ class AutomationBot:
         *,
         reply_to_message_id: int | None = None,
         format_selector: str | None = None,
+        cleanup_message_ids: list[int] | None = None,
     ) -> None:
+        status_message_id: int | None = None
         try:
-            self.api.send_message(chat_id, "Downloading...", reply_to_message_id=reply_to_message_id)
+            status_msg = self.api.send_message(chat_id, "Downloading...", reply_to_message_id=reply_to_message_id)
+            status_message_id = int(status_msg.get("message_id") or 0) or None
+
+            if cleanup_message_ids:
+                for mid in cleanup_message_ids:
+                    self.api.delete_message(chat_id, mid)
+
             with self.downloader.download(url, format_selector=format_selector) as media:
                 self.send_downloaded_media(chat_id, media, reply_to_message_id=reply_to_message_id)
+
+            if status_message_id:
+                self.api.delete_message(chat_id, status_message_id)
         except Exception as exc:
             LOG.exception("Download failed")
+            if status_message_id:
+                self.api.delete_message(chat_id, status_message_id)
             self.api.send_message(chat_id, f"Download failed: {exc}", reply_to_message_id=reply_to_message_id)
 
     def prune_pending_downloads(self) -> None:

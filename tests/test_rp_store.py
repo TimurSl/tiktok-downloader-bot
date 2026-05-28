@@ -298,10 +298,10 @@ class YouTubeQualityTests(unittest.TestCase):
             )
         }
         bot.api = FakeTelegramAPI()
-        calls: list[tuple[int, str, int | None, str | None]] = []
+        calls: list[tuple[int, str, int | None, str | None, list[int] | None]] = []
         bot.download_to_chat_url = MethodType(
-            lambda _self, chat_id, url, *, reply_to_message_id=None, format_selector=None: calls.append(
-                (chat_id, url, reply_to_message_id, format_selector)
+            lambda _self, chat_id, url, *, reply_to_message_id=None, format_selector=None, cleanup_message_ids=None: calls.append(
+                (chat_id, url, reply_to_message_id, format_selector, cleanup_message_ids)
             ),
             bot,
         )
@@ -315,7 +315,7 @@ class YouTubeQualityTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(calls, [(-100, "https://www.youtube.com/watch?v=abc", 10, quality_format_selector(720))])
+        self.assertEqual(calls, [(-100, "https://www.youtube.com/watch?v=abc", 10, quality_format_selector(720), [99])])
         self.assertNotIn("token", bot.pending_downloads)
         self.assertEqual(bot.api.callback_answers, [("callback-id", "Downloading 720p ~80 MB...")])
         self.assertEqual(bot.api.edits, [(-100, 99, "Downloading 720p ~80 MB...")])
@@ -325,6 +325,7 @@ class FakeTelegramAPI:
     def __init__(self) -> None:
         self.callback_answers: list[tuple[str, str]] = []
         self.edits: list[tuple[int, int, str]] = []
+        self.deletions: list[tuple[int, int]] = []
 
     def answer_callback_query(self, callback_query_id: str, text: str = "") -> bool:
         self.callback_answers.append((callback_query_id, text))
@@ -332,6 +333,10 @@ class FakeTelegramAPI:
 
     def edit_message_text(self, chat_id: int, message_id: int, text: str, **_kwargs: object) -> bool:
         self.edits.append((chat_id, message_id, text))
+        return True
+
+    def delete_message(self, chat_id: int, message_id: int) -> bool:
+        self.deletions.append((chat_id, message_id))
         return True
 
 
