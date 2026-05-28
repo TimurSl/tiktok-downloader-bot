@@ -30,6 +30,7 @@ PLACEHOLDER_RE = re.compile(r"\{([^{}]*)\}")
 COMMAND_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 LOG = logging.getLogger("telegram_automation_bot")
 TELEGRAM_MEDIA_GROUP_LIMIT = 10
+PUBLIC_BOT_API_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
 TIKTOK_HOSTS = {
     "tiktok.com",
     "www.tiktok.com",
@@ -970,9 +971,10 @@ class AutomationBot:
 
     def ensure_size(self, file_path: Path) -> None:
         size = file_path.stat().st_size
-        if size > self.config.max_upload_bytes:
+        max_upload_bytes = effective_upload_limit_bytes(self.config)
+        if size > max_upload_bytes:
             mb = size / 1024 / 1024
-            max_mb = self.config.max_upload_bytes / 1024 / 1024
+            max_mb = max_upload_bytes / 1024 / 1024
             raise RuntimeError(f"file is {mb:.1f} MB, max upload is {max_mb:.0f} MB")
 
     def handle_rp_command(self, message: dict[str, Any], text: str) -> None:
@@ -1070,6 +1072,18 @@ class AutomationBot:
 def is_group_chat(message: dict[str, Any]) -> bool:
     chat_type = (message.get("chat") or {}).get("type")
     return chat_type in {"group", "supergroup"}
+
+
+def effective_upload_limit_bytes(config: Config) -> int:
+    configured_limit = int(config.max_upload_bytes)
+    if is_public_bot_api(config.api_base):
+        return min(configured_limit, PUBLIC_BOT_API_UPLOAD_LIMIT_BYTES)
+    return configured_limit
+
+
+def is_public_bot_api(api_base: str) -> bool:
+    parsed = urllib.parse.urlparse(api_base)
+    return parsed.scheme in {"http", "https"} and parsed.netloc.lower() == "api.telegram.org"
 
 
 def first_url(text: str) -> str | None:

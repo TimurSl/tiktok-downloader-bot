@@ -6,8 +6,10 @@ from types import MethodType, SimpleNamespace
 
 from telegram_automation_bot.bot import (
     AutomationBot,
+    PUBLIC_BOT_API_UPLOAD_LIMIT_BYTES,
     RPStore,
     chunk_paths,
+    effective_upload_limit_bytes,
     extract_tiktok_image_urls,
     extract_tiktok_item_struct,
     extract_tiktok_rehydration_data,
@@ -229,6 +231,39 @@ class MessageHandlingTests(unittest.TestCase):
         self.assertTrue(is_group_chat({"chat": {"type": "group"}}))
         self.assertTrue(is_group_chat({"chat": {"type": "supergroup"}}))
         self.assertFalse(is_group_chat({"chat": {"type": "private"}}))
+
+
+class UploadLimitTests(unittest.TestCase):
+    def test_public_bot_api_clamps_configured_limit_to_telegram_upload_cap(self) -> None:
+        config = SimpleNamespace(
+            api_base="https://api.telegram.org",
+            max_upload_bytes=100 * 1024 * 1024,
+        )
+
+        self.assertEqual(effective_upload_limit_bytes(config), PUBLIC_BOT_API_UPLOAD_LIMIT_BYTES)
+
+    def test_custom_bot_api_keeps_configured_limit(self) -> None:
+        config = SimpleNamespace(
+            api_base="http://127.0.0.1:8081",
+            max_upload_bytes=100 * 1024 * 1024,
+        )
+
+        self.assertEqual(effective_upload_limit_bytes(config), 100 * 1024 * 1024)
+
+    def test_ensure_size_rejects_public_bot_api_file_before_upload(self) -> None:
+        bot = AutomationBot.__new__(AutomationBot)
+        bot.config = SimpleNamespace(
+            api_base="https://api.telegram.org",
+            max_upload_bytes=100 * 1024 * 1024,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "video.mp4"
+            with path.open("wb") as handle:
+                handle.truncate(PUBLIC_BOT_API_UPLOAD_LIMIT_BYTES + 1)
+
+            with self.assertRaisesRegex(RuntimeError, "max upload is 50 MB"):
+                bot.ensure_size(path)
 
 
 if __name__ == "__main__":
