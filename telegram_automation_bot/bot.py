@@ -499,19 +499,24 @@ class MediaDownloader:
             shutil.rmtree(job_dir, ignore_errors=True)
 
     def youtube_quality_options(self, url: str) -> list[QualityOption]:
-        options = {
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": self.config.ytdlp_no_playlist,
-            "skip_download": True,
-        }
-        if self.config.ytdlp_cookies:
-            options["cookiefile"] = self.config.ytdlp_cookies
-        if self.config.ytdlp_cookies_from_browser:
-            options["cookiesfrombrowser"] = tuple(self.config.ytdlp_cookies_from_browser.split(":"))
+        with tempfile.TemporaryDirectory(prefix="ytdlp-quality-", dir=self.config.download_dir) as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            options = {
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": self.config.ytdlp_no_playlist,
+                "skip_download": True,
+            }
+            if self.config.ytdlp_cookies:
+                cookie_copy = tmp_path / "cookies.txt"
+                shutil.copyfile(self.config.ytdlp_cookies, cookie_copy)
+                cookie_copy.chmod(0o600)
+                options["cookiefile"] = str(cookie_copy)
+            if self.config.ytdlp_cookies_from_browser:
+                options["cookiesfrombrowser"] = tuple(self.config.ytdlp_cookies_from_browser.split(":"))
 
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=False)
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=False)
 
         formats = info.get("formats") if isinstance(info, dict) else None
         if not isinstance(formats, list):
