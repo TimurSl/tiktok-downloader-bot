@@ -20,7 +20,9 @@ from telegram_automation_bot.bot import (
     extract_tiktok_item_struct,
     extract_tiktok_rehydration_data,
     find_downloaded_files,
+    first_download_url,
     is_group_chat,
+    is_downloadable_url,
     is_tiktok_photo_url,
     is_tiktok_redirect_url,
     is_tiktok_url,
@@ -173,6 +175,18 @@ class DownloadedMediaTests(unittest.TestCase):
         self.assertTrue(is_tiktok_redirect_url("https://www.tiktok.com/t/ZMh123/"))
         self.assertFalse(is_tiktok_redirect_url("https://www.tiktok.com/@user/video/123"))
 
+    def test_downloadable_urls_are_limited_to_supported_hosts(self) -> None:
+        self.assertTrue(is_downloadable_url("https://vm.tiktok.com/ZMh123/"))
+        self.assertTrue(is_downloadable_url("https://www.youtube.com/watch?v=abc"))
+        self.assertFalse(is_downloadable_url("https://example.test/watch?v=abc"))
+
+    def test_first_download_url_skips_regular_links(self) -> None:
+        self.assertEqual(
+            first_download_url("docs https://example.test then https://youtu.be/abc"),
+            "https://youtu.be/abc",
+        )
+        self.assertIsNone(first_download_url("docs https://example.test"))
+
 
 class MessageHandlingTests(unittest.TestCase):
     def test_group_media_links_bypass_user_allowlist(self) -> None:
@@ -215,6 +229,80 @@ class MessageHandlingTests(unittest.TestCase):
         )
 
         self.assertEqual(downloads, [])
+
+    def test_group_regular_links_do_not_bypass_user_allowlist(self) -> None:
+        bot = AutomationBot.__new__(AutomationBot)
+        bot.config = SimpleNamespace(authorized_users=frozenset({100}))
+        bot.bot_username = "media_bot"
+        bot.api = SimpleNamespace(send_message=lambda *args, **kwargs: None)
+        downloads: list[str] = []
+        bot.download_to_chat = MethodType(lambda _self, _message, url: downloads.append(url), bot)
+
+        bot.handle_message(
+            {
+                "text": "@media_bot https://example.test/article",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 200},
+                "message_id": 10,
+            }
+        )
+
+        self.assertEqual(downloads, [])
+
+    def test_authorized_regular_links_are_not_treated_as_downloads(self) -> None:
+        bot = AutomationBot.__new__(AutomationBot)
+        bot.config = SimpleNamespace(authorized_users=frozenset({100}))
+        bot.bot_username = "media_bot"
+        bot.api = SimpleNamespace(send_message=lambda *args, **kwargs: None)
+        calls: list[str] = []
+        bot.download_to_chat = MethodType(lambda _self, _message, url: calls.append(f"download:{url}"), bot)
+        bot.handle_rp_trigger = MethodType(lambda _self, _message, text: calls.append(f"rp:{text}"), bot)
+
+        bot.handle_message(
+            {
+                "text": "share https://example.test/article",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 100},
+                "message_id": 10,
+            }
+        )
+
+        self.assertEqual(calls, ["rp:share https://example.test/article"])
+
+    def test_message_uses_supported_url_after_regular_link(self) -> None:
+        bot = AutomationBot.__new__(AutomationBot)
+        bot.config = SimpleNamespace(authorized_users=frozenset({100}))
+        bot.bot_username = "media_bot"
+        bot.api = SimpleNamespace(send_message=lambda *args, **kwargs: None)
+        downloads: list[str] = []
+        bot.download_to_chat = MethodType(lambda _self, _message, url: downloads.append(url), bot)
+
+        bot.handle_message(
+            {
+                "text": "source https://example.test mirror https://vm.tiktok.com/ZMh123/",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 100},
+                "message_id": 10,
+            }
+        )
+
+        self.assertEqual(downloads, ["https://vm.tiktok.com/ZMh123/"])
+
+    def test_guest_regular_links_are_ignored(self) -> None:
+        bot = AutomationBot.__new__(AutomationBot)
+        bot.config = SimpleNamespace(cache_chat_id="cache")
+        bot.bot_username = "media_bot"
+        calls: list[object] = []
+        bot.api = SimpleNamespace(answer_guest_query=lambda *args, **kwargs: calls.append((args, kwargs)))
+
+        bot.handle_guest_message(
+            {
+                "guest_query_id": "guest-query",
+                "text": "@media_bot https://example.test/article",
+            }
+        )
+
+        self.assertEqual(calls, [])
 
     def test_rp_commands_with_urls_are_not_treated_as_downloads(self) -> None:
         bot = AutomationBot.__new__(AutomationBot)

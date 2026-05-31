@@ -4,9 +4,9 @@ Production Telegram bot for media downloads and lightweight RP automation.
 
 ## Features
 
-- Downloads media links with `yt-dlp`, uploads the result to Telegram, then deletes temporary files.
-- Supports TikTok videos, photo posts, and TikTok short/redirect links. Photo posts are sent as Telegram albums, splitting every 10 images into a new album message.
-- Reacts to media links in groups even when `AUTHORIZED_USER` is set; the allowlist still protects commands and private-chat use.
+- Downloads supported media links, uploads the result to Telegram, then deletes temporary files.
+- Supports TikTok videos, photo posts, TikTok short/redirect links, and YouTube videos. Photo posts are sent as Telegram albums, splitting every 10 images into a new album message.
+- Reacts to supported media links in groups even when `AUTHORIZED_USER` is set; the allowlist still protects commands and private-chat use.
 - Stores RP commands globally per Telegram user in SQLite.
 - Supports Telegram Bot API guest updates through `guest_message` and `answerGuestQuery`.
 - Runs from `nix run .` and includes a NixOS service module.

@@ -770,6 +770,10 @@ def is_tiktok_redirect_url(url: str) -> bool:
     )
 
 
+def is_downloadable_url(url: str) -> bool:
+    return is_tiktok_url(url) or is_youtube_url(url)
+
+
 def tiktok_photo_id(url: str) -> str | None:
     parsed = urllib.parse.urlparse(url)
     path_parts = [part for part in parsed.path.split("/") if part]
@@ -1050,7 +1054,7 @@ class AutomationBot:
         text = message.get("text") or message.get("caption") or ""
         chat_id = message["chat"]["id"]
         message_id = message.get("message_id")
-        url = first_url(strip_bot_mention(text, self.bot_username))
+        url = first_download_url(strip_bot_mention(text, self.bot_username))
         authorized = self.is_authorized(message)
 
         if not authorized:
@@ -1160,7 +1164,7 @@ class AutomationBot:
             return
 
         text = message.get("text") or message.get("caption") or ""
-        url = first_url(strip_bot_mention(text, self.bot_username))
+        url = first_download_url(strip_bot_mention(text, self.bot_username))
         if not url:
             return
 
@@ -1406,6 +1410,14 @@ def first_url(text: str) -> str | None:
     return match.group(0).rstrip(".,;:!?)\"]'")
 
 
+def first_download_url(text: str) -> str | None:
+    for match in URL_RE.finditer(text):
+        url = match.group(0).rstrip(".,;:!?)\"]'")
+        if is_downloadable_url(url):
+            return url
+    return None
+
+
 def strip_bot_mention(text: str, username: str) -> str:
     if not username:
         return text
@@ -1446,11 +1458,11 @@ def render_template(template: str, *, actor: str, target: str) -> str:
 def help_text() -> str:
     return "\n".join(
         [
-            "Send any media URL and I will download it with yt-dlp.",
+            "Send a TikTok or YouTube URL and I will download it.",
             "",
             rp_help_text(),
             "",
-            "Guest mode: mention the bot with a media URL. Guest mode only downloads media; RP commands are ignored there.",
+            "Guest mode: mention the bot with a TikTok or YouTube URL. Guest mode only downloads media; RP commands are ignored there.",
         ]
     )
 
