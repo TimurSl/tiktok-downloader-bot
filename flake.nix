@@ -1,5 +1,5 @@
 {
-  description = "Telegram automation bot with media downloading, RP commands, and guest mode";
+  description = "Telegram media downloader bot with guest mode";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

@@ -9,7 +9,6 @@ let
     [
       "BOT_WORK_DIR=${cfg.workDir}"
       "BOT_DOWNLOAD_DIR=${cfg.downloadDir}"
-      "BOT_DATABASE=${cfg.databasePath}"
       "BOT_API_BASE=${cfg.botApiBase}"
       "BOT_MAX_UPLOAD_MB=${toString cfg.maxUploadMB}"
       "BOT_POLL_TIMEOUT=${toString cfg.pollTimeout}"
@@ -63,12 +62,6 @@ in
       type = types.str;
       default = "${cfg.workDir}/downloads";
       description = "Mutable temporary download directory used for yt-dlp output.";
-    };
-
-    databasePath = mkOption {
-      type = types.str;
-      default = "${cfg.workDir}/bot.sqlite3";
-      description = "SQLite database path for RP commands.";
     };
 
     cacheChatId = mkOption {

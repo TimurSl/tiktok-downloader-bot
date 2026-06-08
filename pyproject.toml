@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "telegram-automation-bot"
 version = "1.0.0"
-description = "Telegram media downloader and roleplay automation bot with guest mode support"
+description = "Telegram media downloader bot with guest mode support"
 requires-python = ">=3.10"
 dependencies = [
   "python-dotenv>=1.0.0",

@@ -4,18 +4,16 @@ import json
 import logging
 import mimetypes
 import os
-import random
 import re
 import shutil
 import signal
-import sqlite3
 import tempfile
 import time
 import uuid
 import urllib.parse
 from html import unescape
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -26,8 +24,6 @@ from dotenv import load_dotenv
 
 URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 TIKTOK_PHOTO_URL_RE = re.compile(r"https?://(?:www\.)?tiktok\.com/@[^/\s]+/photo/(?P<id>\d+)", re.IGNORECASE)
-PLACEHOLDER_RE = re.compile(r"\{([^{}]*)\}")
-COMMAND_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 LOG = logging.getLogger("telegram_automation_bot")
 TELEGRAM_MEDIA_GROUP_LIMIT = 10
 PUBLIC_BOT_API_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
@@ -64,12 +60,68 @@ class TelegramAPIError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ChatContext:
+    chat_id: int | str
+    reply_to_message_id: int | None = None
+    requester_id: int | None = None
+    business_connection_id: str | None = None
+    direct_messages_topic_id: int | None = None
+    guest_query_id: str | None = None
+
+    @classmethod
+    def from_message(cls, message: dict[str, Any]) -> "ChatContext":
+        topic = message.get("direct_messages_topic")
+        direct_topic_id = message.get("direct_messages_topic_id")
+        if direct_topic_id is None and isinstance(topic, dict):
+            direct_topic_id = topic.get("topic_id")
+        return cls(
+            chat_id=message["chat"]["id"],
+            reply_to_message_id=message.get("message_id"),
+            requester_id=message_user_id(message),
+            business_connection_id=empty_to_none(message.get("business_connection_id")),
+            direct_messages_topic_id=int(direct_topic_id) if direct_topic_id is not None else None,
+            guest_query_id=empty_to_none(message.get("guest_query_id")),
+        )
+
+    def without_reply(self) -> "ChatContext":
+        return ChatContext(
+            chat_id=self.chat_id,
+            requester_id=self.requester_id,
+            business_connection_id=self.business_connection_id,
+            direct_messages_topic_id=self.direct_messages_topic_id,
+            guest_query_id=self.guest_query_id,
+        )
+
+    def with_reply(self, message_id: int | None) -> "ChatContext":
+        return ChatContext(
+            chat_id=self.chat_id,
+            reply_to_message_id=message_id,
+            requester_id=self.requester_id,
+            business_connection_id=self.business_connection_id,
+            direct_messages_topic_id=self.direct_messages_topic_id,
+            guest_query_id=self.guest_query_id,
+        )
+
+    def payload(self, *, include_reply: bool = False) -> dict[str, Any]:
+        payload: dict[str, Any] = {"chat_id": self.chat_id}
+        if self.business_connection_id:
+            payload["business_connection_id"] = self.business_connection_id
+        if self.direct_messages_topic_id is not None:
+            payload["direct_messages_topic_id"] = self.direct_messages_topic_id
+        if include_reply and self.reply_to_message_id is not None:
+            payload["reply_parameters"] = {
+                "message_id": self.reply_to_message_id,
+                "allow_sending_without_reply": True,
+            }
+        return payload
+
+
+@dataclass(frozen=True)
 class Config:
     token: str
     api_base: str
     work_dir: Path
     download_dir: Path
-    database_path: Path
     cache_chat_id: str | None
     authorized_users: frozenset[int]
     max_upload_bytes: int
@@ -89,7 +141,6 @@ class Config:
 
         work_dir = Path(os.getenv("BOT_WORK_DIR", "/tmp/telegram-automation-bot")).expanduser()
         download_dir = Path(os.getenv("BOT_DOWNLOAD_DIR", str(work_dir / "downloads"))).expanduser()
-        database_path = Path(os.getenv("BOT_DATABASE", str(work_dir / "bot.sqlite3"))).expanduser()
         max_upload_mb = int(os.getenv("BOT_MAX_UPLOAD_MB", "50"))
 
         return cls(
@@ -97,7 +148,6 @@ class Config:
             api_base=os.getenv("BOT_API_BASE", "https://api.telegram.org").rstrip("/"),
             work_dir=work_dir,
             download_dir=download_dir,
-            database_path=database_path,
             cache_chat_id=empty_to_none(os.getenv("TELEGRAM_CACHE_CHAT_ID")),
             authorized_users=parse_user_ids(os.getenv("AUTHORIZED_USER", "")),
             max_upload_bytes=max_upload_mb * 1024 * 1024,
@@ -181,32 +231,26 @@ class TelegramAPI:
 
     def send_message(
         self,
-        chat_id: int | str,
+        context: ChatContext,
         text: str,
         *,
-        reply_to_message_id: int | None = None,
         reply_markup: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
-        if reply_to_message_id is not None:
-            payload["reply_parameters"] = {
-                "message_id": reply_to_message_id,
-                "allow_sending_without_reply": True,
-            }
+        payload: dict[str, Any] = {**context.payload(include_reply=True), "text": text}
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         return self.call("sendMessage", payload=payload)
 
     def edit_message_text(
         self,
-        chat_id: int | str,
+        context: ChatContext,
         message_id: int,
         text: str,
         *,
         reply_markup: dict[str, Any] | None = None,
     ) -> dict[str, Any] | bool:
         payload: dict[str, Any] = {
-            "chat_id": chat_id,
+            **context.payload(),
             "message_id": message_id,
             "text": text,
         }
@@ -214,9 +258,9 @@ class TelegramAPI:
             payload["reply_markup"] = reply_markup
         return self.call("editMessageText", payload=payload)
 
-    def delete_message(self, chat_id: int | str, message_id: int) -> bool:
+    def delete_message(self, context: ChatContext, message_id: int) -> bool:
         try:
-            return self.call("deleteMessage", payload={"chat_id": chat_id, "message_id": message_id})
+            return self.call("deleteMessage", payload={**context.payload(), "message_id": message_id})
         except TelegramAPIError as exc:
             LOG.debug("deleteMessage failed: %s", exc)
             return False
@@ -227,19 +271,18 @@ class TelegramAPI:
             payload["text"] = text[:200]
         return self.call("answerCallbackQuery", payload=payload, timeout=20)
 
-    def send_chat_action(self, chat_id: int | str, action: str) -> None:
+    def send_chat_action(self, context: ChatContext, action: str) -> None:
         try:
-            self.call("sendChatAction", payload={"chat_id": chat_id, "action": action}, timeout=20)
+            self.call("sendChatAction", payload={**context.payload(), "action": action}, timeout=20)
         except TelegramAPIError as exc:
             LOG.debug("sendChatAction failed: %s", exc)
 
     def send_media(
         self,
-        chat_id: int | str,
+        context: ChatContext,
         file_path: Path,
         *,
         caption: str = "",
-        reply_to_message_id: int | None = None,
     ) -> dict[str, Any]:
         media_kind = detect_media_kind(file_path)
         method, field, action = {
@@ -250,14 +293,10 @@ class TelegramAPI:
             "document": ("sendDocument", "document", "upload_document"),
         }[media_kind]
 
-        self.send_chat_action(chat_id, action)
-        data: dict[str, Any] = {"chat_id": str(chat_id)}
+        self.send_chat_action(context, action)
+        data: dict[str, Any] = stringify_payload(context.payload(include_reply=True))
         if caption:
             data["caption"] = caption[:1024]
-        if reply_to_message_id is not None:
-            data["reply_parameters"] = json.dumps(
-                {"message_id": reply_to_message_id, "allow_sending_without_reply": True}
-            )
 
         with file_path.open("rb") as handle:
             files = {field: (file_path.name, handle)}
@@ -265,18 +304,17 @@ class TelegramAPI:
 
     def send_photo_album(
         self,
-        chat_id: int | str,
+        context: ChatContext,
         file_paths: tuple[Path, ...],
         *,
         caption: str = "",
-        reply_to_message_id: int | None = None,
     ) -> list[dict[str, Any]]:
         if not 2 <= len(file_paths) <= TELEGRAM_MEDIA_GROUP_LIMIT:
             raise ValueError("Telegram media groups must contain 2-10 photos")
 
-        self.send_chat_action(chat_id, "upload_photo")
+        self.send_chat_action(context, "upload_photo")
         data: dict[str, Any] = {
-            "chat_id": str(chat_id),
+            **stringify_payload(context.payload(include_reply=True)),
             "media": json.dumps(
                 [
                     {
@@ -288,10 +326,6 @@ class TelegramAPI:
                 ]
             ),
         }
-        if reply_to_message_id is not None:
-            data["reply_parameters"] = json.dumps(
-                {"message_id": reply_to_message_id, "allow_sending_without_reply": True}
-            )
 
         with ExitStack() as stack:
             files = {
@@ -306,118 +340,6 @@ class TelegramAPI:
             payload={"guest_query_id": guest_query_id, "result": result},
             timeout=60,
         )
-
-
-class RPStore:
-    def __init__(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.path = path
-        with self.connect() as db:
-            self.ensure_schema(db)
-
-    def ensure_schema(self, db: sqlite3.Connection) -> None:
-        cursor = db.execute("PRAGMA table_info(rp_commands)")
-        columns = {row[1] for row in cursor.fetchall()}
-        if "chat_id" in columns:
-            self.migrate_from_chat_scoped_commands(db)
-            return
-
-        db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS rp_commands (
-                user_id INTEGER NOT NULL,
-                command TEXT NOT NULL,
-                template TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                PRIMARY KEY (user_id, command)
-            )
-            """
-        )
-
-    def migrate_from_chat_scoped_commands(self, db: sqlite3.Connection) -> None:
-        db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS rp_commands_user (
-                user_id INTEGER NOT NULL,
-                command TEXT NOT NULL,
-                template TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                PRIMARY KEY (user_id, command)
-            )
-            """
-        )
-        db.execute(
-            """
-            INSERT INTO rp_commands_user (user_id, command, template, created_at)
-            SELECT created_by, command, template, created_at
-            FROM (
-                SELECT
-                    created_by,
-                    command,
-                    template,
-                    created_at,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY created_by, command
-                        ORDER BY created_at DESC
-                    ) AS row_number
-                FROM rp_commands
-                WHERE created_by IS NOT NULL
-            )
-            WHERE row_number = 1
-            ON CONFLICT(user_id, command) DO UPDATE SET
-                template = excluded.template,
-                created_at = excluded.created_at
-            """
-        )
-        db.execute("DROP TABLE rp_commands")
-        db.execute("ALTER TABLE rp_commands_user RENAME TO rp_commands")
-
-    @contextmanager
-    def connect(self) -> Any:
-        db = sqlite3.connect(self.path)
-        try:
-            yield db
-            db.commit()
-        finally:
-            db.close()
-
-    def add(self, user_id: int, command: str, template: str) -> None:
-        with self.connect() as db:
-            db.execute(
-                """
-                INSERT INTO rp_commands (user_id, command, template, created_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(user_id, command) DO UPDATE SET
-                    template = excluded.template,
-                    created_at = excluded.created_at
-                """,
-                (user_id, command, template, int(time.time())),
-            )
-
-    def remove(self, user_id: int, command: str) -> bool:
-        with self.connect() as db:
-            cursor = db.execute(
-                "DELETE FROM rp_commands WHERE user_id = ? AND command = ?",
-                (user_id, command),
-            )
-            return cursor.rowcount > 0
-
-    def get(self, user_id: int, command: str) -> str | None:
-        with self.connect() as db:
-            cursor = db.execute(
-                "SELECT template FROM rp_commands WHERE user_id = ? AND command = ?",
-                (user_id, command),
-            )
-            row = cursor.fetchone()
-        return row[0] if row else None
-
-    def list(self, user_id: int) -> list[tuple[str, str]]:
-        with self.connect() as db:
-            cursor = db.execute(
-                "SELECT command, template FROM rp_commands WHERE user_id = ? ORDER BY command",
-                (user_id,),
-            )
-            return [(row[0], row[1]) for row in cursor.fetchall()]
 
 
 @dataclass
@@ -442,15 +364,30 @@ class QualityOption:
     approx_bytes: int | None = None
 
 
-@dataclass(frozen=True)
-class PendingDownload:
+@dataclass
+class DownloadSession:
+    token: str
     url: str
-    chat_id: int | str
-    reply_to_message_id: int | None
+    context: ChatContext
     requester_id: int | None
     created_at: float
-    options: dict[str, QualityOption]
+    options: dict[str, QualityOption] = field(default_factory=dict)
+    selected_quality: QualityOption | None = None
+    status_message_id: int | None = None
+    attempt_count: int = 0
+    last_error: str | None = None
 
+    def is_expired(self) -> bool:
+        return time.time() - self.created_at > PENDING_DOWNLOAD_TTL_SECONDS
+
+    def action_keyboard(self) -> dict[str, Any]:
+        rows: list[list[dict[str, str]]] = [
+            [{"text": "Retry", "callback_data": f"dls:{self.token}:retry"}],
+        ]
+        if is_youtube_url(self.url):
+            rows.append([{"text": "Quality", "callback_data": f"dls:{self.token}:quality"}])
+        rows.append([{"text": "Cancel", "callback_data": f"dls:{self.token}:cancel"}])
+        return {"inline_keyboard": rows}
 
 class MediaDownloader:
     def __init__(self, config: Config) -> None:
@@ -661,7 +598,18 @@ def quality_keyboard(token: str, options: list[QualityOption]) -> dict[str, Any]
                 }
             ]
         )
+    rows.append([{"text": "Cancel", "callback_data": f"dls:{token}:cancel"}])
     return {"inline_keyboard": rows}
+
+
+def stringify_payload(payload: dict[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for key, value in payload.items():
+        if isinstance(value, (dict, list)):
+            result[key] = json.dumps(value)
+        else:
+            result[key] = str(value)
+    return result
 
 
 def quality_format_selector(height: int) -> str:
@@ -892,6 +840,10 @@ def first_url_from_json(value: Any) -> str | None:
             url = first_url_from_json(value.get(key))
             if url:
                 return url
+        for item in value.values():
+            url = first_url_from_json(item)
+            if url:
+                return url
     return None
 
 
@@ -1013,11 +965,10 @@ class AutomationBot:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.api = TelegramAPI(config)
-        self.rp = RPStore(config.database_path)
         self.downloader = MediaDownloader(config)
         self.running = True
         self.bot_username = ""
-        self.pending_downloads: dict[str, PendingDownload] = {}
+        self.sessions: dict[str, DownloadSession] = {}
 
     def run(self) -> None:
         me = self.api.call("getMe")
@@ -1052,9 +1003,14 @@ class AutomationBot:
 
     def handle_message(self, message: dict[str, Any]) -> None:
         text = message.get("text") or message.get("caption") or ""
+<<<<<<< HEAD
         chat_id = message["chat"]["id"]
         message_id = message.get("message_id")
         url = first_download_url(strip_bot_mention(text, self.bot_username))
+=======
+        context = ChatContext.from_message(message)
+        url = first_url(strip_bot_mention(text, self.bot_username))
+>>>>>>> 2ec99ef (f)
         authorized = self.is_authorized(message)
 
         if not authorized:
@@ -1062,22 +1018,20 @@ class AutomationBot:
                 self.prepare_download_to_chat(message, url)
                 return
             if text.startswith("/"):
-                self.api.send_message(chat_id, "You are not authorized to use this bot.", reply_to_message_id=message_id)
+                self.api.send_message(context, "You are not authorized to use this bot.")
             return
 
         if text.startswith("/start") or text.startswith("/help"):
-            self.api.send_message(chat_id, help_text(), reply_to_message_id=message_id)
+            self.api.send_message(context, help_text())
             return
 
-        if text.startswith("/rp"):
-            self.handle_rp_command(message, text)
+        if text.startswith("/"):
+            self.api.send_message(context, "Unknown command. Send a media URL to download it.")
             return
 
         if url:
             self.prepare_download_to_chat(message, url)
             return
-
-        self.handle_rp_trigger(message, text)
 
     def prepare_download_to_chat(self, message: dict[str, Any], url: str) -> None:
         if is_youtube_url(url):
@@ -1086,77 +1040,82 @@ class AutomationBot:
         self.download_to_chat(message, url)
 
     def prompt_youtube_quality(self, message: dict[str, Any], url: str) -> None:
-        chat_id = message["chat"]["id"]
-        message_id = message.get("message_id")
         try:
             options = self.downloader.youtube_quality_options(url)
             token = uuid.uuid4().hex[:12]
-            self.pending_downloads[token] = PendingDownload(
+            session = DownloadSession(
+                token=token,
                 url=url,
-                chat_id=chat_id,
-                reply_to_message_id=message_id,
+                context=ChatContext.from_message(message),
                 requester_id=message_user_id(message),
                 created_at=time.time(),
                 options={option.key: option for option in options},
             )
-            self.prune_pending_downloads()
-            self.api.send_message(
-                chat_id,
-                "Choose YouTube quality:",
-                reply_to_message_id=message_id,
-                reply_markup=quality_keyboard(token, options),
-            )
+            self.sessions[token] = session
+            self.prune_sessions()
+            self.send_quality_prompt(session, options)
         except Exception as exc:
             LOG.exception("Could not prepare YouTube quality choices")
-            self.api.send_message(chat_id, f"Could not read YouTube qualities: {exc}", reply_to_message_id=message_id)
+            self.api.send_message(ChatContext.from_message(message), friendly_error_message(exc))
 
     def handle_callback_query(self, callback_query: dict[str, Any]) -> None:
         callback_id = str(callback_query.get("id") or "")
         data = str(callback_query.get("data") or "")
-        if not data.startswith("dlq:"):
+        if not (data.startswith("dlq:") or data.startswith("dls:")):
             if callback_id:
                 self.api.answer_callback_query(callback_id)
             return
 
-        _prefix, token, option_key = data.split(":", maxsplit=2) if data.count(":") >= 2 else ("", "", "")
-        pending = self.pending_downloads.get(token)
-        callback_user_id = message_user_id(callback_query)
-        if not pending or time.time() - pending.created_at > PENDING_DOWNLOAD_TTL_SECONDS:
-            if callback_id:
-                self.api.answer_callback_query(callback_id, "This download choice expired.")
-            self.pending_downloads.pop(token, None)
+        prefix, token, action = data.split(":", maxsplit=2) if data.count(":") >= 2 else ("", "", "")
+        session = self.callback_session(token, callback_query, callback_id)
+        if not session:
             return
-        if pending.requester_id is not None and callback_user_id != pending.requester_id:
-            if callback_id:
-                self.api.answer_callback_query(callback_id, "Only the requester can choose this download.")
-            return
-
-        option = pending.options.get(option_key)
-        if not option:
-            if callback_id:
-                self.api.answer_callback_query(callback_id, "Unknown quality choice.")
-            return
-
-        self.pending_downloads.pop(token, None)
-        if callback_id:
-            self.api.answer_callback_query(callback_id, f"Downloading {option.label}...")
 
         message = callback_query.get("message") or {}
-        edit_chat_id = (message.get("chat") or {}).get("id")
-        edit_message_id = message.get("message_id")
-        if edit_chat_id is not None and edit_message_id is not None:
-            try:
-                self.api.edit_message_text(edit_chat_id, int(edit_message_id), f"Downloading {option.label}...")
-            except TelegramAPIError as exc:
-                LOG.debug("Could not edit quality prompt: %s", exc)
+        callback_message_id = message.get("message_id")
 
-        self.download_to_chat_url(
-            pending.chat_id,
-            pending.url,
-            reply_to_message_id=pending.reply_to_message_id,
-            format_selector=option.format_selector,
-            cleanup_message_ids=[int(edit_message_id)] if edit_message_id is not None else None,
-        )
+        if prefix == "dlq":
+            option = session.options.get(action)
+            if not option:
+                if callback_id:
+                    self.api.answer_callback_query(callback_id, "Unknown quality choice.")
+                return
+            session.selected_quality = option
+            if callback_id:
+                self.api.answer_callback_query(callback_id, f"Downloading {option.label}...")
+            self.run_download_session(session, callback_message_id=int(callback_message_id) if callback_message_id else None)
+            return
+
+        if action == "retry":
+            session.attempt_count += 1
+            if callback_id:
+                self.api.answer_callback_query(callback_id, "Retrying...")
+            self.run_download_session(session, callback_message_id=int(callback_message_id) if callback_message_id else None)
+            return
+
+        if action == "quality" and is_youtube_url(session.url):
+            try:
+                options = self.downloader.youtube_quality_options(session.url)
+                session.options = {option.key: option for option in options}
+                if callback_id:
+                    self.api.answer_callback_query(callback_id, "Choose quality.")
+                self.send_quality_prompt(session, options)
+            except Exception as exc:
+                LOG.exception("Could not prepare YouTube quality choices")
+                if callback_id:
+                    self.api.answer_callback_query(callback_id, friendly_error_message(exc))
+            return
+
+        if action == "cancel":
+            self.sessions.pop(session.token, None)
+            if callback_id:
+                self.api.answer_callback_query(callback_id, "Canceled.")
+            if callback_message_id:
+                self.safe_edit_message(session.context, int(callback_message_id), "Download canceled.")
+            return
+
+        if callback_id:
+            self.api.answer_callback_query(callback_id, "Unknown download action.")
 
     def handle_guest_message(self, message: dict[str, Any]) -> None:
         guest_query_id = message.get("guest_query_id")
@@ -1195,7 +1154,7 @@ class AutomationBot:
 
                 self.ensure_size(media.path)
                 cached_message = self.api.send_media(
-                    self.config.cache_chat_id,
+                    ChatContext(chat_id=self.config.cache_chat_id),
                     media.path,
                     caption=f"Guest cache: {media.title}",
                 )
@@ -1208,55 +1167,116 @@ class AutomationBot:
             LOG.exception("Guest download failed")
             self.api.answer_guest_query(
                 guest_query_id,
-                article_result("Download failed", f"Download failed: {exc}"),
+                article_result("Download failed", friendly_error_message(exc)),
             )
 
     def download_to_chat(self, message: dict[str, Any], url: str) -> None:
-        chat_id = message["chat"]["id"]
-        message_id = message.get("message_id")
-        self.download_to_chat_url(chat_id, url, reply_to_message_id=message_id)
+        token = uuid.uuid4().hex[:12]
+        session = DownloadSession(
+            token=token,
+            url=url,
+            context=ChatContext.from_message(message),
+            requester_id=message_user_id(message),
+            created_at=time.time(),
+        )
+        self.sessions[token] = session
+        self.run_download_session(session)
 
-    def download_to_chat_url(
+    def run_download_session(
         self,
-        chat_id: int | str,
-        url: str,
+        session: DownloadSession,
         *,
-        reply_to_message_id: int | None = None,
-        format_selector: str | None = None,
-        cleanup_message_ids: list[int] | None = None,
+        callback_message_id: int | None = None,
     ) -> None:
-        status_message_id: int | None = None
+        status_context = session.context.without_reply()
         try:
-            status_msg = self.api.send_message(chat_id, "Downloading...", reply_to_message_id=reply_to_message_id)
-            status_message_id = int(status_msg.get("message_id") or 0) or None
+            if callback_message_id:
+                session.status_message_id = callback_message_id
+                self.safe_edit_message(status_context, callback_message_id, "Downloading...")
+            else:
+                status_msg = self.api.send_message(session.context, "Downloading...")
+                session.status_message_id = int(status_msg.get("message_id") or 0) or None
 
-            if cleanup_message_ids:
-                for mid in cleanup_message_ids:
-                    self.api.delete_message(chat_id, mid)
+            format_selector = session.selected_quality.format_selector if session.selected_quality else None
+            with self.downloader.download(session.url, format_selector=format_selector) as media:
+                self.send_downloaded_media(session.context, media)
 
-            with self.downloader.download(url, format_selector=format_selector) as media:
-                self.send_downloaded_media(chat_id, media, reply_to_message_id=reply_to_message_id)
-
-            if status_message_id:
-                self.api.delete_message(chat_id, status_message_id)
+            if is_youtube_url(session.url):
+                self.finish_session_status(session, "Download complete.")
+            else:
+                if session.status_message_id:
+                    self.api.delete_message(status_context, session.status_message_id)
+                self.sessions.pop(session.token, None)
         except Exception as exc:
             LOG.exception("Download failed")
-            if status_message_id:
-                self.api.delete_message(chat_id, status_message_id)
-            self.api.send_message(chat_id, f"Download failed: {exc}", reply_to_message_id=reply_to_message_id)
+            session.last_error = str(exc)
+            self.finish_session_status(session, friendly_error_message(exc))
 
-    def prune_pending_downloads(self) -> None:
+    def finish_session_status(self, session: DownloadSession, text: str) -> None:
+        if session.status_message_id:
+            self.safe_edit_message(
+                session.context.without_reply(),
+                session.status_message_id,
+                text,
+                reply_markup=session.action_keyboard(),
+            )
+        else:
+            status_msg = self.api.send_message(
+                session.context,
+                text,
+                reply_markup=session.action_keyboard(),
+            )
+            session.status_message_id = int(status_msg.get("message_id") or 0) or None
+
+    def send_quality_prompt(self, session: DownloadSession, options: list[QualityOption]) -> None:
+        self.api.send_message(
+            session.context,
+            "Choose YouTube quality:",
+            reply_markup=quality_keyboard(session.token, options),
+        )
+
+    def callback_session(
+        self,
+        token: str,
+        callback_query: dict[str, Any],
+        callback_id: str,
+    ) -> DownloadSession | None:
+        session = self.sessions.get(token)
+        callback_user_id = message_user_id(callback_query)
+        if not session or session.is_expired():
+            if callback_id:
+                self.api.answer_callback_query(callback_id, "This download expired.")
+            self.sessions.pop(token, None)
+            return None
+        if session.requester_id is not None and callback_user_id != session.requester_id:
+            if callback_id:
+                self.api.answer_callback_query(callback_id, "Only the requester can use this download.")
+            return None
+        return session
+
+    def safe_edit_message(
+        self,
+        context: ChatContext,
+        message_id: int,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            self.api.edit_message_text(context, message_id, text, reply_markup=reply_markup)
+        except TelegramAPIError as exc:
+            LOG.debug("Could not edit message: %s", exc)
+
+    def prune_sessions(self) -> None:
         cutoff = time.time() - PENDING_DOWNLOAD_TTL_SECONDS
-        for token, pending in list(self.pending_downloads.items()):
-            if pending.created_at < cutoff:
-                self.pending_downloads.pop(token, None)
+        for token, session in list(self.sessions.items()):
+            if session.created_at < cutoff:
+                self.sessions.pop(token, None)
 
     def send_downloaded_media(
         self,
-        chat_id: int | str,
+        context: ChatContext,
         media: DownloadedMedia,
-        *,
-        reply_to_message_id: int | None = None,
     ) -> None:
         if media.is_photo_album:
             for album in photo_album_chunks(media.paths):
@@ -1264,27 +1284,37 @@ class AutomationBot:
                     self.ensure_size(path)
                 if len(album) == 1:
                     self.api.send_media(
-                        chat_id,
+                        context,
                         album[0],
                         caption=media.title,
-                        reply_to_message_id=reply_to_message_id,
                     )
                 else:
-                    self.api.send_photo_album(
-                        chat_id,
-                        album,
-                        caption=media.title,
-                        reply_to_message_id=reply_to_message_id,
-                    )
+                    self.send_album_chunk(context, album, media.title)
             return
 
         self.ensure_size(media.path)
         self.api.send_media(
-            chat_id,
+            context,
             media.path,
             caption=media.title,
-            reply_to_message_id=reply_to_message_id,
         )
+
+    def send_album_chunk(self, context: ChatContext, album: tuple[Path, ...], title: str) -> None:
+        try:
+            self.api.send_photo_album(context, album, caption=title)
+            return
+        except TelegramAPIError:
+            LOG.debug("Photo album upload failed; retrying once", exc_info=True)
+
+        try:
+            self.api.send_photo_album(context, album, caption=title)
+            return
+        except TelegramAPIError:
+            LOG.debug("Photo album upload retry failed; falling back to individual photos", exc_info=True)
+
+        for index, path in enumerate(album):
+            self.api.send_media(context, path, caption=title if index == 0 else "")
+        self.api.send_message(context.without_reply(), "Album upload failed; sent photos one by one.")
 
     def ensure_size(self, file_path: Path) -> None:
         size = file_path.stat().st_size
@@ -1293,91 +1323,6 @@ class AutomationBot:
             mb = size / 1024 / 1024
             max_mb = max_upload_bytes / 1024 / 1024
             raise RuntimeError(f"file is {mb:.1f} MB, max upload is {max_mb:.0f} MB")
-
-    def handle_rp_command(self, message: dict[str, Any], text: str) -> None:
-        user_id = message_user_id(message)
-        reply_to = message.get("message_id")
-        if user_id is None:
-            self.api.send_message(
-                message["chat"]["id"],
-                "RP commands need a Telegram user account.",
-                reply_to_message_id=reply_to,
-            )
-            return
-
-        parts = text.split(maxsplit=3)
-        action = parts[1].lower() if len(parts) > 1 else "help"
-
-        if action == "add":
-            if len(parts) < 4:
-                self.api.send_message(
-                    message["chat"]["id"],
-                    "Usage: /rp add <command> <template>",
-                    reply_to_message_id=reply_to,
-                )
-                return
-            command = parts[2].lower()
-            template = parts[3]
-            if command.startswith("/") or not COMMAND_RE.match(command):
-                self.api.send_message(
-                    message["chat"]["id"],
-                    "Command must be 1-64 letters, numbers, underscores, or dashes, without slash.",
-                    reply_to_message_id=reply_to,
-                )
-                return
-            self.rp.add(user_id, command, template)
-            self.api.send_message(message["chat"]["id"], f"Added RP command: {command}", reply_to_message_id=reply_to)
-            return
-
-        if action in {"remove", "delete", "del"}:
-            if len(parts) < 3:
-                self.api.send_message(message["chat"]["id"], "Usage: /rp remove <command>", reply_to_message_id=reply_to)
-                return
-            command = parts[2].lower()
-            removed = self.rp.remove(user_id, command)
-            text_out = f"Removed RP command: {command}" if removed else f"No RP command named {command}"
-            self.api.send_message(message["chat"]["id"], text_out, reply_to_message_id=reply_to)
-            return
-
-        if action == "list":
-            commands = self.rp.list(user_id)
-            if not commands:
-                self.api.send_message(
-                    message["chat"]["id"],
-                    "You have no RP commands.",
-                    reply_to_message_id=reply_to,
-                )
-                return
-            lines = ["RP commands:"] + [f"{command}: {template}" for command, template in commands]
-            self.api.send_message(message["chat"]["id"], "\n".join(lines), reply_to_message_id=reply_to)
-            return
-
-        self.api.send_message(message["chat"]["id"], rp_help_text(), reply_to_message_id=reply_to)
-
-    def handle_rp_trigger(self, message: dict[str, Any], text: str) -> None:
-        if not text.strip():
-            return
-        user_id = message_user_id(message)
-        if user_id is None:
-            return
-        command, _, target_text = text.strip().partition(" ")
-        template = self.rp.get(user_id, command.lower())
-        if template is None:
-            return
-
-        actor = display_user(message.get("from"))
-        target = target_text.strip()
-        reply = message.get("reply_to_message")
-        if reply and reply.get("from"):
-            target = display_user(reply.get("from"))
-
-        rendered = render_template(template, actor=actor, target=target)
-        if rendered.strip():
-            self.api.send_message(
-                message["chat"]["id"],
-                rendered,
-                reply_to_message_id=message.get("message_id"),
-            )
 
     def is_authorized(self, message: dict[str, Any]) -> bool:
         if not self.config.authorized_users:
@@ -1396,6 +1341,22 @@ def effective_upload_limit_bytes(config: Config) -> int:
     if is_public_bot_api(config.api_base):
         return min(configured_limit, PUBLIC_BOT_API_UPLOAD_LIMIT_BYTES)
     return configured_limit
+
+
+def friendly_error_message(exc: BaseException) -> str:
+    message = str(exc)
+    lower = message.lower()
+    if "max upload is" in lower or "file is " in lower and " mb" in lower:
+        return "The file is too large for Telegram upload."
+    if isinstance(exc, TelegramAPIError):
+        return "Telegram upload failed."
+    if isinstance(exc, TimeoutError) or "timed out" in lower or "timeout" in lower:
+        return "Network timeout while downloading media."
+    if any(needle in lower for needle in ("private video", "unavailable", "not available", "login required")):
+        return "Media is unavailable or private."
+    if any(needle in lower for needle in ("without a usable output file", "metadata", "image urls")):
+        return "Could not find downloadable media metadata."
+    return "Download failed."
 
 
 def is_public_bot_api(api_base: str) -> bool:
@@ -1439,25 +1400,10 @@ def display_user(user: dict[str, Any] | None) -> str:
     return " ".join(part for part in parts if part) or str(user.get("id", ""))
 
 
-def render_template(template: str, *, actor: str, target: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        body = match.group(1)
-        if body == "actor":
-            return actor
-        if body == "target":
-            return target
-        if "|" in body:
-            choices = body.split("|")
-            selected = random.choice(choices)
-            return "" if selected.isspace() else selected.strip()
-        return match.group(0)
-
-    return PLACEHOLDER_RE.sub(replace, template)
-
-
 def help_text() -> str:
     return "\n".join(
         [
+<<<<<<< HEAD
             "Send a TikTok or YouTube URL and I will download it.",
             "",
             rp_help_text(),
@@ -1478,6 +1424,13 @@ def rp_help_text() -> str:
             "Commands are saved globally for your Telegram user and can be used anywhere the bot can read your messages.",
             "Template placeholders: {actor}, {target}, and random choices like {warmly|softly| }.",
             "Trigger with the command word, for example: hug @user, or reply with hug.",
+=======
+            "Send any media URL and I will download it with yt-dlp.",
+            "For YouTube links, choose a quality from the buttons.",
+            "If a download fails, use Retry, Quality, or Cancel from the inline buttons.",
+            "",
+            "Guest mode: mention the bot with a media URL. Single files are returned from cache; albums need a normal chat with the bot.",
+>>>>>>> 2ec99ef (f)
         ]
     )
 
