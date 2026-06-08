@@ -1003,17 +1003,8 @@ class AutomationBot:
 
     def handle_message(self, message: dict[str, Any]) -> None:
         text = message.get("text") or message.get("caption") or ""
-<<<<<<< HEAD
-<<<<<<< HEAD
-        chat_id = message["chat"]["id"]
-        message_id = message.get("message_id")
-        url = first_download_url(strip_bot_mention(text, self.bot_username))
-=======
-=======
->>>>>>> 2ec99ef (f)
         context = ChatContext.from_message(message)
         url = first_url(strip_bot_mention(text, self.bot_username))
->>>>>>> 2ec99ef (f)
         authorized = self.is_authorized(message)
 
         if not authorized:
@@ -1406,42 +1397,11 @@ def display_user(user: dict[str, Any] | None) -> str:
 def help_text() -> str:
     return "\n".join(
         [
-<<<<<<< HEAD
-<<<<<<< HEAD
-            "Send a TikTok or YouTube URL and I will download it.",
-            "",
-            rp_help_text(),
-            "",
-            "Guest mode: mention the bot with a TikTok or YouTube URL. Guest mode only downloads media; RP commands are ignored there.",
-        ]
-    )
-
-
-def rp_help_text() -> str:
-    return "\n".join(
-        [
-            "RP commands:",
-            "/rp add <command> <template>",
-            "/rp remove <command>",
-            "/rp list",
-            "",
-            "Commands are saved globally for your Telegram user and can be used anywhere the bot can read your messages.",
-            "Template placeholders: {actor}, {target}, and random choices like {warmly|softly| }.",
-            "Trigger with the command word, for example: hug @user, or reply with hug.",
-=======
             "Send any media URL and I will download it with yt-dlp.",
             "For YouTube links, choose a quality from the buttons.",
             "If a download fails, use Retry, Quality, or Cancel from the inline buttons.",
             "",
             "Guest mode: mention the bot with a media URL. Single files are returned from cache; albums need a normal chat with the bot.",
->>>>>>> 2ec99ef (f)
-=======
-            "Send any media URL and I will download it with yt-dlp.",
-            "For YouTube links, choose a quality from the buttons.",
-            "If a download fails, use Retry, Quality, or Cancel from the inline buttons.",
-            "",
-            "Guest mode: mention the bot with a media URL. Single files are returned from cache; albums need a normal chat with the bot.",
->>>>>>> 2ec99ef (f)
         ]
     )
 
