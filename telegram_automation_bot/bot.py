@@ -42,6 +42,101 @@ YOUTUBE_HOSTS = {
     "music.youtube.com",
     "youtu.be",
 }
+MEDIA_PLATFORM_DOMAINS = {
+    "b23.tv",
+    "bandcamp.com",
+    "bilibili.com",
+    "clips.twitch.tv",
+    "dai.ly",
+    "dailymotion.com",
+    "facebook.com",
+    "fb.watch",
+    "instagram.com",
+    "kick.com",
+    "nicovideo.jp",
+    "niconico.jp",
+    "ok.ru",
+    "on.soundcloud.com",
+    "pin.it",
+    "pinterest.com",
+    "reddit.com",
+    "redd.it",
+    "rumble.com",
+    "soundcloud.com",
+    "streamable.com",
+    "threads.net",
+    "tiktok.com",
+    "twitch.tv",
+    "twitter.com",
+    "vimeo.com",
+    "vk.com",
+    "x.com",
+    "youtu.be",
+    "youtube.com",
+}
+DIRECT_FILE_EXTENSIONS = {
+    ".7z",
+    ".aac",
+    ".apk",
+    ".avi",
+    ".bmp",
+    ".csv",
+    ".doc",
+    ".docx",
+    ".epub",
+    ".exe",
+    ".flac",
+    ".gif",
+    ".gz",
+    ".heic",
+    ".iso",
+    ".jpeg",
+    ".jpg",
+    ".json",
+    ".m3u8",
+    ".m4a",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".ogg",
+    ".opus",
+    ".pdf",
+    ".png",
+    ".ppt",
+    ".pptx",
+    ".rar",
+    ".tar",
+    ".tgz",
+    ".txt",
+    ".wav",
+    ".webm",
+    ".webp",
+    ".xls",
+    ".xlsx",
+    ".xml",
+    ".zip",
+}
+INCOMPLETE_DOWNLOAD_SUFFIXES = (".part", ".ytdl", ".temp", ".tmp")
+SIDECAR_DOWNLOAD_EXTENSIONS = {
+    ".ass",
+    ".description",
+    ".info.json",
+    ".json",
+    ".srt",
+    ".ssa",
+    ".srv1",
+    ".srv2",
+    ".srv3",
+    ".ttml",
+    ".txt",
+    ".vtt",
+    ".xml",
+}
+USABLE_DOWNLOAD_MEDIA_KINDS = {"animation", "audio", "photo", "video"}
 YOUTUBE_QUALITY_HEIGHTS = (1080, 720, 480, 360)
 PENDING_DOWNLOAD_TTL_SECONDS = 15 * 60
 TIKTOK_WEB_HEADERS = {
@@ -364,6 +459,12 @@ class QualityOption:
     approx_bytes: int | None = None
 
 
+@dataclass(frozen=True)
+class DownloadStrategy:
+    name: str
+    format_selector: str
+
+
 @dataclass
 class DownloadSession:
     token: str
@@ -404,43 +505,91 @@ class MediaDownloader:
                 yield self.download_tiktok_photo_post(download_url, job_dir)
                 return
 
-            outtmpl = str(job_dir / "%(title).180B-%(id)s.%(ext)s")
-            options = {
-                "format": format_selector or self.config.ytdlp_format,
-                "outtmpl": outtmpl,
-                "merge_output_format": "mp4",
-                "noplaylist": self.config.ytdlp_no_playlist,
-                "quiet": True,
-                "no_warnings": True,
-                "restrictfilenames": True,
-            }
-            if self.config.ytdlp_cookies:
-                cookie_copy = job_dir / "cookies.txt"
-                shutil.copyfile(self.config.ytdlp_cookies, cookie_copy)
-                cookie_copy.chmod(0o600)
-                options["cookiefile"] = str(cookie_copy)
-            if self.config.ytdlp_cookies_from_browser:
-                options["cookiesfrombrowser"] = tuple(self.config.ytdlp_cookies_from_browser.split(":"))
-            with yt_dlp.YoutubeDL(options) as ydl:
+            failures: list[str] = []
+            last_error: BaseException | None = None
+            tiktok_photo_fallback_attempted = False
+
+            for index, strategy in enumerate(self.download_strategies(format_selector), start=1):
+                attempt_dir = job_dir / f"{index:02d}-{strategy.name}"
+                attempt_dir.mkdir(parents=True, exist_ok=True)
+                options = self.ytdlp_options(attempt_dir, strategy.format_selector)
                 try:
-                    info = ydl.extract_info(download_url, download=True)
-                except yt_dlp.utils.DownloadError:
-                    if is_tiktok_url(download_url):
+                    with yt_dlp.YoutubeDL(options) as ydl:
+                        info = ydl.extract_info(download_url, download=True)
+
+                    downloaded_files = find_downloaded_files(attempt_dir)
+                    if not downloaded_files:
+                        raise RuntimeError("yt-dlp completed without a usable output file")
+                    media_paths = select_downloaded_media(downloaded_files)
+                    if not media_paths:
+                        raise RuntimeError("yt-dlp completed without a usable media output file")
+                    title = str(info.get("title") or media_paths[0].stem) if isinstance(info, dict) else media_paths[0].stem
+                except Exception as exc:
+                    last_error = exc
+                    failures.append(f"{strategy.name}: {exc}")
+                    LOG.debug("yt-dlp strategy %s failed for %s: %s", strategy.name, download_url, exc)
+                    if is_tiktok_url(download_url) and not tiktok_photo_fallback_attempted:
+                        tiktok_photo_fallback_attempted = True
                         try:
-                            yield self.download_tiktok_photo_post(download_url, job_dir)
-                            return
+                            tiktok_media = self.download_tiktok_photo_post(download_url, job_dir)
                         except Exception as photo_exc:
                             LOG.debug("TikTok photo fallback failed for %s: %s", download_url, photo_exc)
-                    raise
+                        else:
+                            yield tiktok_media
+                            return
+                    continue
 
-            downloaded_files = find_downloaded_files(job_dir)
-            if not downloaded_files:
-                raise RuntimeError("yt-dlp completed without a usable output file")
-            media_paths = select_downloaded_media(downloaded_files)
-            title = str(info.get("title") or media_paths[0].stem) if isinstance(info, dict) else media_paths[0].stem
-            yield DownloadedMedia(paths=media_paths, title=title)
+                yield DownloadedMedia(paths=media_paths, title=title)
+                return
+
+            failure_summary = "; ".join(failures[-3:])
+            raise RuntimeError(
+                f"yt-dlp could not download media after {len(failures)} strategies: {failure_summary}"
+            ) from last_error
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
+
+    def download_strategies(self, format_selector: str | None) -> list[DownloadStrategy]:
+        requested = format_selector or self.config.ytdlp_format
+        candidates = [
+            DownloadStrategy("requested", requested),
+            DownloadStrategy("best-merged", "bestvideo*+bestaudio/bestvideo+bestaudio/best"),
+            DownloadStrategy("compatible-mp4", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best"),
+            DownloadStrategy("single-best", "best"),
+        ]
+
+        strategies: list[DownloadStrategy] = []
+        seen: set[str] = set()
+        for strategy in candidates:
+            if not strategy.format_selector or strategy.format_selector in seen:
+                continue
+            seen.add(strategy.format_selector)
+            strategies.append(strategy)
+        return strategies
+
+    def ytdlp_options(self, job_dir: Path, format_selector: str) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "format": format_selector,
+            "outtmpl": str(job_dir / "%(title).180B-%(id)s.%(ext)s"),
+            "merge_output_format": "mp4",
+            "noplaylist": self.config.ytdlp_no_playlist,
+            "quiet": True,
+            "no_warnings": True,
+            "restrictfilenames": True,
+            "continuedl": True,
+            "file_access_retries": 3,
+            "fragment_retries": 3,
+            "retries": 3,
+            "socket_timeout": 30,
+        }
+        if self.config.ytdlp_cookies:
+            cookie_copy = job_dir / "cookies.txt"
+            shutil.copyfile(self.config.ytdlp_cookies, cookie_copy)
+            cookie_copy.chmod(0o600)
+            options["cookiefile"] = str(cookie_copy)
+        if self.config.ytdlp_cookies_from_browser:
+            options["cookiesfrombrowser"] = tuple(self.config.ytdlp_cookies_from_browser.split(":"))
+        return options
 
     def youtube_quality_options(self, url: str) -> list[QualityOption]:
         with tempfile.TemporaryDirectory(prefix="ytdlp-quality-", dir=self.config.download_dir) as tmp_dir:
@@ -556,7 +705,8 @@ def find_downloaded_files(directory: Path) -> list[Path]:
         for path in directory.rglob("*")
         if path.is_file()
         and path.name != "cookies.txt"
-        and not path.name.endswith((".part", ".ytdl", ".temp", ".tmp"))
+        and not path.name.endswith(INCOMPLETE_DOWNLOAD_SUFFIXES)
+        and not is_sidecar_download_file(path)
     ]
 
 
@@ -564,10 +714,23 @@ def select_downloaded_media(paths: list[Path]) -> tuple[Path, ...]:
     if not paths:
         return ()
 
-    sorted_paths = tuple(sorted(paths, key=natural_path_key))
+    media_paths = [path for path in paths if is_usable_downloaded_media(path)]
+    if not media_paths:
+        return ()
+
+    sorted_paths = tuple(sorted(media_paths, key=natural_path_key))
     if len(sorted_paths) > 1 and all(detect_media_kind(path) == "photo" for path in sorted_paths):
         return sorted_paths
-    return (max(paths, key=lambda path: path.stat().st_size),)
+    return (max(media_paths, key=lambda path: path.stat().st_size),)
+
+
+def is_sidecar_download_file(path: Path) -> bool:
+    name = path.name.lower()
+    return any(name.endswith(extension) for extension in SIDECAR_DOWNLOAD_EXTENSIONS)
+
+
+def is_usable_downloaded_media(path: Path) -> bool:
+    return detect_media_kind(path) in USABLE_DOWNLOAD_MEDIA_KINDS
 
 
 def natural_path_key(path: Path) -> list[int | str]:
@@ -684,13 +847,13 @@ def format_bytes(size: int) -> str:
 
 def is_youtube_url(url: str) -> bool:
     parsed = urllib.parse.urlparse(url)
-    host = parsed.netloc.lower()
+    host = (parsed.hostname or "").lower()
     return host in YOUTUBE_HOSTS or host.endswith(".youtube.com")
 
 
 def is_tiktok_photo_url(url: str) -> bool:
     parsed = urllib.parse.urlparse(url)
-    host = parsed.netloc.lower()
+    host = (parsed.hostname or "").lower()
     path_parts = [part for part in parsed.path.split("/") if part]
     return (
         host in {"tiktok.com", "www.tiktok.com", "m.tiktok.com"}
@@ -703,13 +866,13 @@ def is_tiktok_photo_url(url: str) -> bool:
 
 def is_tiktok_url(url: str) -> bool:
     parsed = urllib.parse.urlparse(url)
-    host = parsed.netloc.lower()
+    host = (parsed.hostname or "").lower()
     return host in TIKTOK_HOSTS
 
 
 def is_tiktok_redirect_url(url: str) -> bool:
     parsed = urllib.parse.urlparse(url)
-    host = parsed.netloc.lower()
+    host = (parsed.hostname or "").lower()
     path_parts = [part for part in parsed.path.split("/") if part]
     return host in TIKTOK_SHORT_HOSTS or (
         host in {"tiktok.com", "www.tiktok.com", "m.tiktok.com"}
@@ -719,7 +882,22 @@ def is_tiktok_redirect_url(url: str) -> bool:
 
 
 def is_downloadable_url(url: str) -> bool:
-    return is_tiktok_url(url) or is_youtube_url(url)
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host or is_direct_file_url(parsed):
+        return False
+    return is_media_platform_host(host)
+
+
+def is_media_platform_host(host: str) -> bool:
+    return any(host == domain or host.endswith(f".{domain}") for domain in MEDIA_PLATFORM_DOMAINS)
+
+
+def is_direct_file_url(parsed: urllib.parse.ParseResult) -> bool:
+    suffix = Path(urllib.parse.unquote(parsed.path)).suffix.lower()
+    return suffix in DIRECT_FILE_EXTENSIONS
 
 
 def tiktok_photo_id(url: str) -> str | None:
@@ -1004,7 +1182,7 @@ class AutomationBot:
     def handle_message(self, message: dict[str, Any]) -> None:
         text = message.get("text") or message.get("caption") or ""
         context = ChatContext.from_message(message)
-        url = first_url(strip_bot_mention(text, self.bot_username))
+        url = first_download_url(strip_bot_mention(text, self.bot_username))
         authorized = self.is_authorized(message)
 
         if not authorized:
@@ -1020,7 +1198,7 @@ class AutomationBot:
             return
 
         if text.startswith("/"):
-            self.api.send_message(context, "Unknown command. Send a media URL to download it.")
+            self.api.send_message(context, "Unknown command. Send a supported media-platform URL to download it.")
             return
 
         if url:
@@ -1348,7 +1526,7 @@ def friendly_error_message(exc: BaseException) -> str:
         return "Network timeout while downloading media."
     if any(needle in lower for needle in ("private video", "unavailable", "not available", "login required")):
         return "Media is unavailable or private."
-    if any(needle in lower for needle in ("without a usable output file", "metadata", "image urls")):
+    if any(needle in lower for needle in ("without a usable output file", "without a usable media output file", "metadata", "image urls")):
         return "Could not find downloadable media metadata."
     return "Download failed."
 
@@ -1397,9 +1575,9 @@ def display_user(user: dict[str, Any] | None) -> str:
 def help_text() -> str:
     return "\n".join(
         [
-            "Send any media URL and I will download it with yt-dlp.",
+            "Send a supported media-platform URL and I will download it with yt-dlp.",
             "For YouTube links, choose a quality from the buttons.",
-            "If a download fails, use Retry, Quality, or Cancel from the inline buttons.",
+            "If a download fails, I try multiple yt-dlp strategies; use Retry, Quality, or Cancel from the inline buttons.",
             "",
             "Guest mode: mention the bot with a media URL. Single files are returned from cache; albums need a normal chat with the bot.",
         ]

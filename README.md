@@ -4,8 +4,10 @@ Production Telegram bot for media downloads.
 
 ## Features
 
-- Downloads media links with `yt-dlp`, uploads the result to Telegram, then deletes temporary files.
+- Downloads supported media-platform links with `yt-dlp`, uploads the result to Telegram, then deletes temporary files.
 - Supports TikTok videos, photo posts, and TikTok short/redirect links. Photo posts are sent as Telegram albums, splitting every 10 images into a new album message.
+- Uses a conservative media-platform gate for YouTube, TikTok, Instagram, X/Twitter, Reddit, Twitch, Vimeo, SoundCloud, and similar `yt-dlp` extractors; ordinary web links and direct file links are ignored.
+- Tries multiple `yt-dlp` format strategies when a download breaks, while filtering sidecar files, subtitles, and metadata from Telegram uploads.
 - Supports YouTube quality selection with retry, reselect-quality, and cancel buttons.
 - Reacts to media links in groups even when `AUTHORIZED_USER` is set; the allowlist still protects commands and private-chat use.
 - Supports Telegram Bot API guest updates through `guest_message` and `answerGuestQuery`.
@@ -50,6 +52,8 @@ LOG_LEVEL=INFO
 ```
 
 Group note: to react to every normal group message, disable BotFather privacy mode for the bot. With privacy mode enabled, Telegram only sends commands, replies, mentions, and service-visible messages to the bot.
+
+Link detection note: group auto-reactions only trigger for known media-platform URLs. Plain articles, arbitrary domains, and direct files such as PDFs, archives, images, or video files are ignored so the bot does not download unnecessary media outside `yt-dlp` extractor sites.
 
 Guest mode note: Telegram guest replies use `answerGuestQuery`, which sends an inline result. Local files cannot be uploaded directly in that call, so set `TELEGRAM_CACHE_CHAT_ID` to a private chat/channel where the bot can upload downloaded files and reuse the returned `file_id`. Telegram guest replies cannot send albums; TikTok photo albums must be sent in a normal chat with the bot.
 

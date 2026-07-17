@@ -9,6 +9,7 @@ from telegram_automation_bot.bot import (
     ChatContext,
     DownloadSession,
     DownloadedMedia,
+    MediaDownloader,
     PUBLIC_BOT_API_UPLOAD_LIMIT_BYTES,
     QualityOption,
     TelegramAPIError,
@@ -21,8 +22,10 @@ from telegram_automation_bot.bot import (
     extract_tiktok_item_struct,
     extract_tiktok_rehydration_data,
     find_downloaded_files,
+    first_download_url,
     friendly_error_message,
     is_group_chat,
+    is_downloadable_url,
     is_tiktok_photo_url,
     is_tiktok_redirect_url,
     is_tiktok_url,
@@ -58,6 +61,22 @@ class DownloadedMediaTests(unittest.TestCase):
 
             self.assertEqual(paths, (large,))
 
+    def test_sidecars_and_unsupported_outputs_are_not_selected_for_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            video = directory / "video.mp4"
+            archive = directory / "archive.zip"
+            info = directory / "video.info.json"
+            subtitles = directory / "video.en.vtt"
+            video.write_bytes(b"1" * 20)
+            archive.write_bytes(b"1" * 50)
+            info.write_text("{}", encoding="utf-8")
+            subtitles.write_text("WEBVTT", encoding="utf-8")
+
+            paths = select_downloaded_media(find_downloaded_files(directory))
+
+            self.assertEqual(paths, (video,))
+
     def test_chunk_paths_splits_media_groups_at_ten_items(self) -> None:
         paths = tuple(Path(f"image-{index}.jpg") for index in range(23))
 
@@ -77,6 +96,27 @@ class DownloadedMediaTests(unittest.TestCase):
             with self.subTest(count=count):
                 paths = tuple(Path(f"image-{index}.jpg") for index in range(count))
                 self.assertEqual([len(chunk) for chunk in photo_album_chunks(paths)], expected_sizes)
+
+
+class DownloaderStrategyTests(unittest.TestCase):
+    def test_download_strategies_try_requested_then_fallback_formats(self) -> None:
+        downloader = MediaDownloader.__new__(MediaDownloader)
+        downloader.config = SimpleNamespace(ytdlp_format="bv*+ba/best")
+
+        strategies = downloader.download_strategies("bv*[height<=720]+ba/b[height<=720]/best")
+
+        self.assertEqual(strategies[0].name, "requested")
+        self.assertEqual(strategies[0].format_selector, "bv*[height<=720]+ba/b[height<=720]/best")
+        self.assertIn("bestvideo*+bestaudio/bestvideo+bestaudio/best", [strategy.format_selector for strategy in strategies])
+        self.assertIn("best", [strategy.format_selector for strategy in strategies])
+
+    def test_download_strategies_dedupe_configured_default(self) -> None:
+        downloader = MediaDownloader.__new__(MediaDownloader)
+        downloader.config = SimpleNamespace(ytdlp_format="best")
+
+        strategies = downloader.download_strategies(None)
+
+        self.assertEqual([strategy.format_selector for strategy in strategies].count("best"), 1)
 
 
 class TikTokMetadataTests(unittest.TestCase):
@@ -146,6 +186,63 @@ class TikTokMetadataTests(unittest.TestCase):
 
 
 class MessageHandlingTests(unittest.TestCase):
+    def test_authorized_chat_ignores_non_media_links(self) -> None:
+        bot = AutomationBot.__new__(AutomationBot)
+        bot.config = SimpleNamespace(authorized_users=frozenset())
+        bot.bot_username = "media_bot"
+        bot.api = FakeTelegramAPI()
+        downloads: list[str] = []
+        bot.prepare_download_to_chat = MethodType(lambda _self, _message, url: downloads.append(url), bot)
+
+        bot.handle_message(
+            {
+                "text": "please read https://example.test/docs instead",
+                "chat": {"id": 200, "type": "private"},
+                "from": {"id": 200},
+                "message_id": 10,
+            }
+        )
+
+        self.assertEqual(downloads, [])
+
+    def test_message_downloads_later_media_link_instead_of_first_ordinary_link(self) -> None:
+        bot = AutomationBot.__new__(AutomationBot)
+        bot.config = SimpleNamespace(authorized_users=frozenset())
+        bot.bot_username = "media_bot"
+        bot.api = FakeTelegramAPI()
+        downloads: list[str] = []
+        bot.prepare_download_to_chat = MethodType(lambda _self, _message, url: downloads.append(url), bot)
+
+        bot.handle_message(
+            {
+                "text": "context https://example.test/docs video https://www.instagram.com/reel/abc123/",
+                "chat": {"id": 200, "type": "private"},
+                "from": {"id": 200},
+                "message_id": 10,
+            }
+        )
+
+        self.assertEqual(downloads, ["https://www.instagram.com/reel/abc123/"])
+
+    def test_group_ordinary_links_do_not_bypass_user_allowlist(self) -> None:
+        bot = AutomationBot.__new__(AutomationBot)
+        bot.config = SimpleNamespace(authorized_users=frozenset({100}))
+        bot.bot_username = "media_bot"
+        bot.api = FakeTelegramAPI()
+        downloads: list[str] = []
+        bot.prepare_download_to_chat = MethodType(lambda _self, _message, url: downloads.append(url), bot)
+
+        bot.handle_message(
+            {
+                "text": "https://example.test/docs",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 200},
+                "message_id": 10,
+            }
+        )
+
+        self.assertEqual(downloads, [])
+
     def test_group_media_links_bypass_user_allowlist(self) -> None:
         bot = AutomationBot.__new__(AutomationBot)
         bot.config = SimpleNamespace(authorized_users=frozenset({100}))
@@ -205,12 +302,49 @@ class MessageHandlingTests(unittest.TestCase):
         )
 
         self.assertEqual(downloads, [])
-        self.assertEqual(bot.api.messages[-1][1], "Unknown command. Send a media URL to download it.")
+        self.assertEqual(bot.api.messages[-1][1], "Unknown command. Send a supported media-platform URL to download it.")
 
     def test_group_chat_detection(self) -> None:
         self.assertTrue(is_group_chat({"chat": {"type": "group"}}))
         self.assertTrue(is_group_chat({"chat": {"type": "supergroup"}}))
         self.assertFalse(is_group_chat({"chat": {"type": "private"}}))
+
+
+class DownloadableUrlTests(unittest.TestCase):
+    def test_detects_conservative_media_platform_urls(self) -> None:
+        downloadable = [
+            "https://www.youtube.com/watch?v=abc",
+            "https://vm.tiktok.com/ZMh123/",
+            "https://www.instagram.com/reel/abc123/",
+            "https://x.com/example/status/123",
+            "https://www.reddit.com/r/videos/comments/abc/title/",
+            "https://www.twitch.tv/example/clip/CuriousClip",
+            "https://vimeo.com/123456789",
+            "https://soundcloud.com/artist/track",
+        ]
+
+        for url in downloadable:
+            with self.subTest(url=url):
+                self.assertTrue(is_downloadable_url(url))
+
+    def test_rejects_ordinary_and_direct_file_urls(self) -> None:
+        rejected = [
+            "https://example.test/article",
+            "https://example.test/video.mp4",
+            "https://example.test/archive.zip?download=1",
+            "https://cdn.example.test/photo.jpg",
+            "https://example.test/document.pdf",
+        ]
+
+        for url in rejected:
+            with self.subTest(url=url):
+                self.assertFalse(is_downloadable_url(url))
+
+    def test_first_download_url_skips_ordinary_links(self) -> None:
+        self.assertEqual(
+            first_download_url("docs https://example.test then https://x.com/example/status/123"),
+            "https://x.com/example/status/123",
+        )
 
 
 class ChatContextTests(unittest.TestCase):
