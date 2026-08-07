@@ -1197,10 +1197,6 @@ class AutomationBot:
             self.api.send_message(context, help_text())
             return
 
-        if text.startswith("/"):
-            self.api.send_message(context, "Unknown command. Send a supported media-platform URL to download it.")
-            return
-
         if url:
             self.prepare_download_to_chat(message, url)
             return
