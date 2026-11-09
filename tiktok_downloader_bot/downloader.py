@@ -649,6 +649,42 @@ def make_thumbnail(video: Path, directory: Path) -> Path | None:
     return None
 
 
+def convert_to_animation(
+    video: Path,
+    directory: Path,
+    *,
+    max_width: int = 480,
+    fps: int = 20,
+    max_seconds: int = 60,
+) -> Path:
+    """Convert a video to a silent, looping-friendly H.264 clip.
+
+    Telegram shows such a clip (sent with sendAnimation) as a GIF, at a fraction of the
+    size of a real .gif file.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is not installed, cannot make a GIF")
+    directory.mkdir(parents=True, exist_ok=True)
+    output = directory / f"{video.stem[:60]}-gif.mp4"
+    command = [
+        ffmpeg, "-y", "-loglevel", "error", "-i", str(video), "-t", str(max_seconds), "-an",
+        "-vf", f"fps={fps},scale='trunc(min({max_width},iw)/2)*2':-2",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart", str(output),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, timeout=300)
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.decode(errors="replace").strip()[-300:] if exc.stderr else ""
+        raise RuntimeError(f"ffmpeg could not convert the video to a GIF: {detail}") from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"ffmpeg could not convert the video to a GIF: {exc}") from exc
+    if not output.exists() or output.stat().st_size == 0:
+        raise RuntimeError("ffmpeg produced no GIF output")
+    return output
+
+
 def quality_format_selector(height: int) -> str:
     return f"bv*[height<={height}]+ba/b[height<={height}]/best"
 

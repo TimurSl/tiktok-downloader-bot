@@ -6,12 +6,18 @@ DEFAULT_LANG = "en"
 
 STRINGS: dict[str, dict[str, str]] = {
     "en": {
+        "extra_busy": "The other button of this message is still being processed. Please wait a moment.",
+        "btn_gif": "🎞 GIF",
+        "gif_sending": "Making the GIF…",
+        "gif_busy": "The GIF is already being made.",
+        "gif_failed": "Could not make the GIF: {reason}",
+        "set_gif": "GIF button",
         "help": (
             "Send me a link to a video, photo post or audio and I will download it.\n"
             "Supported: TikTok, YouTube, Instagram, X/Twitter, Reddit, Twitch, Vimeo, SoundCloud and more.\n"
             "\n"
             "• YouTube: pick a quality (or MP3) with the buttons.\n"
-            "• Videos and TikTok photo posts get a 🎵 Sound button. The sound is only sent if you press it.\n"
+            "• Videos and TikTok photo posts get a 🎵 Sound button, videos also a 🎞 GIF button. Nothing extra is sent unless you press it.\n"
             "• /audio <link> – download only the sound.\n"
             "• /settings – captions, default quality, auto-download in groups and more."
         ),
@@ -85,12 +91,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "inline_unauthorized_title": "Not authorized",
     },
     "ru": {
+        "extra_busy": "Другая кнопка этого сообщения ещё обрабатывается. Подождите немного.",
+        "btn_gif": "🎞 GIF",
+        "gif_sending": "Делаю GIF…",
+        "gif_busy": "GIF уже делается.",
+        "gif_failed": "Не удалось сделать GIF: {reason}",
+        "set_gif": "Кнопка GIF",
         "help": (
             "Отправьте ссылку на видео, пост с фото или аудио, и я скачаю его.\n"
             "Поддерживаются: TikTok, YouTube, Instagram, X/Twitter, Reddit, Twitch, Vimeo, SoundCloud и другие.\n"
             "\n"
             "• YouTube: выберите качество (или MP3) кнопками.\n"
-            "• У видео и фото-постов TikTok есть кнопка 🎵 Звук. Звук отправляется только по нажатию.\n"
+            "• У видео и фото-постов TikTok есть кнопка 🎵 Звук, у видео ещё и 🎞 GIF. Ничего лишнего не отправляется без нажатия.\n"
             "• /audio <ссылка> – скачать только звук.\n"
             "• /settings – подписи, качество по умолчанию, автозагрузка в группах и другое."
         ),
@@ -164,12 +176,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "inline_unauthorized_title": "Нет доступа",
     },
     "uk": {
+        "extra_busy": "Іншу кнопку цього повідомлення ще обробляють. Зачекайте трохи.",
+        "btn_gif": "🎞 GIF",
+        "gif_sending": "Роблю GIF…",
+        "gif_busy": "GIF уже створюється.",
+        "gif_failed": "Не вдалося створити GIF: {reason}",
+        "set_gif": "Кнопка GIF",
         "help": (
             "Надішліть посилання на відео, пост із фото або аудіо, і я завантажу його.\n"
             "Підтримуються: TikTok, YouTube, Instagram, X/Twitter, Reddit, Twitch, Vimeo, SoundCloud та інші.\n"
             "\n"
             "• YouTube: оберіть якість (або MP3) кнопками.\n"
-            "• Відео та фото-пости TikTok мають кнопку 🎵 Звук. Звук надсилається лише після натискання.\n"
+            "• Відео та фото-пости TikTok мають кнопку 🎵 Звук, відео ще й 🎞 GIF. Нічого зайвого не надсилається без натискання.\n"
             "• /audio <посилання> – завантажити лише звук.\n"
             "• /settings – підписи, якість за замовчуванням, автозавантаження в групах тощо."
         ),

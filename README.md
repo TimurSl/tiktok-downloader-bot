@@ -6,6 +6,7 @@ Telegram bot that downloads media from TikTok, YouTube, Instagram, X/Twitter, Re
 
 - **TikTok videos, photo posts and short links.** Photo posts are sent as albums (10 images per album message).
 - **Sound on demand.** Videos and TikTok photo posts get a **🎵 Sound** button. The sound is never sent unless somebody presses it. Albums cannot carry buttons, so they get a small silent follow-up message with the button.
+- **GIF on demand.** Short videos (up to 60 s) also get a **🎞 GIF** button next to the sound button. Pressing it fetches a small copy of the video, converts it with ffmpeg to a silent looping clip (max 480 px wide) and sends it as a Telegram animation, which Telegram shows and saves as a GIF. Each button disappears once it was used; the other stays.
 - **Quiet by default.** The bot never replies to (and so never pings) the user: everything is sent as a silent message. Replies can be switched on per chat in `/settings`, and are silent too.
 - **YouTube quality picker** with MP3, retry, reselect and cancel buttons. Qualities that cannot fit into the upload limit are hidden, and "Auto" picks the best one that fits.
 - **Live progress** in the status message (`Downloading… 42% · 3.1 MB/s`) and a **Cancel** button that really stops a running download.
@@ -15,7 +16,7 @@ Telegram bot that downloads media from TikTok, YouTube, Instagram, X/Twitter, Re
 - **Proper video uploads**: streaming flag, width/height/duration and a thumbnail. Photo + video carousels are sent as one mixed album.
 - **Captions** with the description (trailing hashtag spam removed, long text collapsed), the uploader and a link to the original post.
 - **Too-big files are detected early**, while downloading, instead of after downloading everything.
-- **`/settings` per chat**: default quality, captions, sound button, auto-download in groups, delete the link message afterwards, reply to the link message.
+- **`/settings` per chat**: default quality, captions, sound button, GIF button, auto-download in groups, delete the link message afterwards, reply to the link message.
 - **`/audio <link>`** downloads only the sound of any supported link (or reply to a message with a link). **`/dl <link>`** downloads a link even where auto-download is off.
 - **Inline mode** (`@bot <link>` in any chat), optional, see below.
 - **Languages:** English, Russian and Ukrainian, picked from each user's Telegram language.

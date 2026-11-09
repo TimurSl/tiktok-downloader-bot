@@ -1,4 +1,6 @@
 import json
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -23,6 +25,8 @@ from tiktok_downloader_bot.downloader import (
     MediaDownloader,
     ProgressInfo,
     QualityOption,
+    convert_to_animation,
+    probe_media,
     best_audio_format,
     best_video_format,
     combined_format_size,
@@ -746,3 +750,64 @@ class TelegramPayloadTests(unittest.TestCase):
         api = TelegramAPI(SimpleNamespace(api_base="http://x", token="t", poll_timeout=1))
         with self.assertRaises(ValueError):
             api.send_media_group(ChatContext(chat_id=1), [("photo", "a")])
+
+
+@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg is required")
+class GifConversionTests(unittest.TestCase):
+    def make_source(self, directory: Path, *, size: str = "853x480", seconds: int = 3) -> Path:
+        # MJPEG in Matroska so that odd frame sizes (which H.264 refuses) can be generated too.
+        source = directory / "source.mkv"
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"testsrc=duration={seconds}:size={size}:rate=30",
+                "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}", "-c:v", "mjpeg", "-pix_fmt", "yuvj420p",
+                "-c:a", "aac", "-shortest", str(source),
+            ],
+            check=True,
+        )
+        return source
+
+    def streams(self, path: Path) -> list[str]:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(path)],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        return out.split()
+
+    def test_output_is_silent_small_and_has_even_dimensions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self.make_source(Path(tmp), size="853x480")
+
+            output = convert_to_animation(source, Path(tmp) / "gif")
+
+            self.assertEqual(self.streams(source), ["video", "audio"])
+            self.assertEqual(self.streams(output), ["video"])  # no sound track
+            info = probe_media(output)
+            self.assertLessEqual(info["width"], 480)
+            self.assertEqual((info["width"] % 2, info["height"] % 2), (0, 0))
+            self.assertEqual(info["duration"], 3)
+
+    def test_small_videos_are_not_upscaled_and_odd_sizes_are_made_even(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self.make_source(Path(tmp), size="321x241", seconds=1)
+
+            output = convert_to_animation(source, Path(tmp) / "gif")
+
+            info = probe_media(output)
+            self.assertEqual((info["width"], info["height"]), (320, 240))
+
+    def test_long_videos_are_cut_to_the_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self.make_source(Path(tmp), size="160x90", seconds=5)
+
+            output = convert_to_animation(source, Path(tmp) / "gif", max_seconds=2)
+
+            self.assertEqual(probe_media(output)["duration"], 2)
+
+    def test_unreadable_input_raises_a_clear_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            broken = Path(tmp) / "broken.mp4"
+            broken.write_bytes(b"not a video")
+
+            with self.assertRaisesRegex(RuntimeError, "could not convert"):
+                convert_to_animation(broken, Path(tmp) / "gif")
