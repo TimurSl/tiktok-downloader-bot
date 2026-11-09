@@ -16,12 +16,13 @@ QUALITY_CHOICES = ("ask", "auto", "1080", "720", "480", "audio")
 SETTING_DEFAULTS: dict[str, Any] = {
     "captions": True,
     "sound": True,
+    "gif": True,
     "auto": True,
     "delete_original": False,
     "reply": False,
     "quality": "ask",
 }
-BOOL_SETTINGS = ("captions", "sound", "auto", "delete_original", "reply")
+BOOL_SETTINGS = ("captions", "sound", "gif", "auto", "delete_original", "reply")
 
 
 def read_json(path: Path | None) -> Any:

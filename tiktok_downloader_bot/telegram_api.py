@@ -293,8 +293,9 @@ class TelegramAPI:
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         meta = meta or MediaMeta()
-        if kind == "video":
-            payload["supports_streaming"] = True
+        if kind in {"video", "animation"}:
+            if kind == "video":
+                payload["supports_streaming"] = True
             for name in ("width", "height", "duration"):
                 value = getattr(meta, name)
                 if value:

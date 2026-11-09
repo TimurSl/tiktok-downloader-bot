@@ -2,6 +2,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from collections import Counter, OrderedDict
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -10,7 +11,7 @@ from typing import Any
 from tiktok_downloader_bot.bot import (
     DownloadSession,
     DownloaderBot,
-    SoundRequest,
+    ExtraRequest,
     StopPolling,
     cache_key,
     help_text,
@@ -55,6 +56,7 @@ class FakeTelegramAPI:
         self.callback_answers: list[tuple[str, str]] = []
         self.edits: list[tuple[int, int, str, Any]] = []
         self.markup_edits: list[tuple[int, int]] = []
+        self.markup_values: list[Any] = []
         self.deletions: list[tuple[int, int]] = []
         self.messages: list[tuple[Any, str, ChatContext, Any]] = []
         self.media: list[dict[str, Any]] = []
@@ -84,6 +86,7 @@ class FakeTelegramAPI:
 
     def edit_message_reply_markup(self, context: ChatContext, message_id: int, reply_markup: Any = None) -> bool:
         self.markup_edits.append((context.chat_id, message_id))
+        self.markup_values.append(reply_markup)
         return True
 
     def delete_message(self, context: ChatContext, message_id: int) -> bool:
@@ -179,7 +182,7 @@ def make_bot(
     bot.file_cache = FileIdCache(None)
     bot.scheduler = ImmediateScheduler()
     bot.sessions = {}
-    bot.sound_requests = OrderedDict()
+    bot.extra_requests = OrderedDict()
     bot.state_lock = threading.Lock()
     bot.started_at = time.time()
     bot.stats = Counter()
@@ -198,6 +201,10 @@ def message(text: str, *, chat_id: int = 200, chat_type: str = "private", user_i
         "message_id": 10,
         **extra,
     }
+
+
+def button_labels(markup: dict[str, Any] | None) -> list[str]:
+    return [button["text"] for row in (markup or {}).get("inline_keyboard", []) for button in row]
 
 
 def capture_queue(bot: DownloaderBot) -> list[tuple[list[str], bool]]:
@@ -538,12 +545,57 @@ class DownloadFlowTests(unittest.TestCase):
 
     def test_sound_button_can_be_disabled_per_chat(self) -> None:
         bot = make_bot(downloader=FakeDownloader(self.video()))
-        session = make_session(settings=SettingsStore(None).get(1) | {"sound": False})
+        session = make_session(settings=SettingsStore(None).get(1) | {"sound": False, "gif": False})
 
         bot.run_download_session(session)
 
         self.assertIsNone(bot.api.media[0]["reply_markup"])
-        self.assertEqual(bot.sound_requests, OrderedDict())
+        self.assertEqual(bot.extra_requests, OrderedDict())
+
+    def test_each_extra_button_can_be_disabled_on_its_own(self) -> None:
+        bot = make_bot(downloader=FakeDownloader(self.video()))
+        bot.run_download_session(make_session(settings=SettingsStore(None).get(1) | {"sound": False}))
+        self.assertEqual(button_labels(bot.api.media[0]["reply_markup"]), ["🎞 GIF"])
+
+        bot = make_bot(downloader=FakeDownloader(self.video()))
+        bot.run_download_session(make_session(settings=SettingsStore(None).get(1) | {"gif": False}))
+        self.assertEqual(button_labels(bot.api.media[0]["reply_markup"]), ["🎵 Sound"])
+
+    def test_videos_get_sound_and_gif_buttons_in_one_row(self) -> None:
+        bot = make_bot(downloader=FakeDownloader(self.video()))
+
+        bot.run_download_session(make_session())
+
+        markup = bot.api.media[0]["reply_markup"]
+        self.assertEqual(len(markup["inline_keyboard"]), 1)
+        self.assertEqual(button_labels(markup), ["🎵 Sound", "🎞 GIF"])
+        callbacks = [button["callback_data"] for button in markup["inline_keyboard"][0]]
+        self.assertTrue(callbacks[0].startswith("snd:") and callbacks[1].startswith("gif:"))
+        self.assertEqual(callbacks[0][4:], callbacks[1][4:])
+        self.assertEqual(bot.api.media[0]["kind"], "video")
+        self.assertEqual([m for m in bot.api.media if m["kind"] in {"audio", "animation"}], [])  # nothing unasked
+
+    def test_long_videos_get_no_gif_button_but_keep_the_sound_button(self) -> None:
+        bot = make_bot(downloader=FakeDownloader(self.video(duration=61)))
+
+        bot.run_download_session(make_session())
+
+        self.assertEqual(button_labels(bot.api.media[0]["reply_markup"]), ["🎵 Sound"])
+
+    def test_photos_albums_audio_and_cached_long_videos_never_offer_a_gif(self) -> None:
+        bot = make_bot(downloader=FakeDownloader(DownloadedMedia(paths=(make_media_file(".jpg"),), title="p")))
+        bot.run_download_session(make_session("https://www.tiktok.com/@bob/photo/1"))
+        self.assertEqual(button_labels(bot.api.media[0]["reply_markup"]), ["🎵 Sound"])
+
+        audio = make_bot(downloader=FakeDownloader(DownloadedMedia(paths=(make_media_file(".mp3"),), title="s")))
+        audio.run_download_session(make_session("https://soundcloud.com/a/b"))
+        self.assertIsNone(audio.api.media[0]["reply_markup"])
+
+        cached = make_bot(downloader=FakeDownloader(self.video(duration=300)))
+        url = "https://www.tiktok.com/@bob/video/1"
+        cached.run_download_session(make_session(url))
+        cached.run_download_session(make_session(url))  # second send comes from the cache
+        self.assertEqual(button_labels(cached.api.media[1]["reply_markup"]), ["🎵 Sound"])
 
     def test_captions_can_be_disabled_per_chat(self) -> None:
         bot = make_bot(downloader=FakeDownloader(self.video()))
@@ -563,7 +615,7 @@ class DownloadFlowTests(unittest.TestCase):
         self.assertEqual([kind for kind, _ in bot.api.albums[0]["items"]], ["photo"] * 3)
         helper = [m for m in bot.api.messages if m[1] == "🎵 Want the sound of this post?"][0]
         callback = helper[3]["inline_keyboard"][0][0]["callback_data"]
-        request = bot.sound_requests[callback[4:]]
+        request = bot.extra_requests[callback[4:]]
         self.assertTrue(request.is_helper)
         self.assertEqual(request.url, "https://www.tiktok.com/@bob/photo/1")
         self.assertEqual([m for m in bot.api.media if m["kind"] == "audio"], [])
@@ -868,7 +920,7 @@ class SoundButtonTests(unittest.TestCase):
         )
         self.downloader = FakeDownloader(self.audio)
         self.bot = make_bot(downloader=self.downloader)
-        self.bot.sound_requests["tok"] = SoundRequest(
+        self.bot.extra_requests["tok"] = ExtraRequest(
             url="https://www.tiktok.com/@bob/video/1",
             context=ChatContext(chat_id=-100, requester_id=200, chat_type="supergroup"),
             created_at=time.time(),
@@ -896,11 +948,11 @@ class SoundButtonTests(unittest.TestCase):
         self.assertEqual((sent["meta"].title, sent["meta"].performer, sent["meta"].duration), ("original sound", "Alice", 15))
         self.assertEqual(self.bot.api.callback_answers, [("cb", "Getting the sound…")])
         self.assertEqual(self.bot.api.markup_edits, [(-100, 55)])
-        self.assertNotIn("tok", self.bot.sound_requests)
+        self.assertNotIn("tok", self.bot.extra_requests)
         self.assertEqual(self.bot.stats["sounds_sent"], 1)
 
     def test_helper_message_is_deleted_instead_of_edited(self) -> None:
-        self.bot.sound_requests["tok"].is_helper = True
+        self.bot.extra_requests["tok"].is_helper = True
 
         self.press()
 
@@ -911,7 +963,7 @@ class SoundButtonTests(unittest.TestCase):
         self.press(user_id=999)
         self.assertIsNone(self.bot.api.media[0]["context"].reply_to_message_id)
 
-        self.bot.sound_requests["tok"] = SoundRequest(url="https://x.test", context=ChatContext(chat_id=-100), created_at=time.time())
+        self.bot.extra_requests["tok"] = ExtraRequest(url="https://x.test", context=ChatContext(chat_id=-100), created_at=time.time())
         self.bot.settings.toggle(-100, "reply")
         self.press()
         self.assertEqual(self.bot.api.media[1]["context"].reply_to_message_id, 55)
@@ -919,14 +971,14 @@ class SoundButtonTests(unittest.TestCase):
 
     def test_second_press_is_served_from_the_file_id_cache(self) -> None:
         self.press()
-        self.bot.sound_requests["tok"] = SoundRequest(url="https://www.tiktok.com/@bob/video/1", context=ChatContext(chat_id=-100), created_at=time.time())
+        self.bot.extra_requests["tok"] = ExtraRequest(url="https://www.tiktok.com/@bob/video/1", context=ChatContext(chat_id=-100), created_at=time.time())
         self.press()
 
         self.assertEqual(len(self.downloader.calls), 1)
         self.assertEqual(self.bot.api.media[1]["source"], "file-1")
 
     def test_press_is_ignored_while_the_sound_is_already_being_fetched(self) -> None:
-        self.bot.sound_requests["tok"].busy = True
+        self.bot.extra_requests["tok"].busy = True
 
         self.press()
 
@@ -934,12 +986,12 @@ class SoundButtonTests(unittest.TestCase):
         self.assertEqual(self.bot.api.callback_answers, [("cb", "The sound is already on its way.")])
 
     def test_expired_buttons_and_unauthorized_private_users(self) -> None:
-        self.bot.sound_requests["tok"].created_at = 0
+        self.bot.extra_requests["tok"].created_at = 0
         self.press()
         self.assertEqual(self.bot.api.callback_answers[-1][1], "This download expired.")
-        self.assertNotIn("tok", self.bot.sound_requests)
+        self.assertNotIn("tok", self.bot.extra_requests)
 
-        self.bot.sound_requests["tok"] = SoundRequest(url="https://x.test", context=ChatContext(chat_id=5), created_at=time.time())
+        self.bot.extra_requests["tok"] = ExtraRequest(url="https://x.test", context=ChatContext(chat_id=5), created_at=time.time())
         self.bot.config.authorized_users = frozenset({1})
         self.press(chat_type="private")
         self.assertEqual(self.bot.api.callback_answers[-1][1], "You are not authorized to use this bot.")
@@ -951,8 +1003,8 @@ class SoundButtonTests(unittest.TestCase):
         self.press(lang="ru")
 
         self.assertIn("Не удалось получить звук", self.bot.api.messages[-1][1])
-        self.assertIn("tok", self.bot.sound_requests)
-        self.assertFalse(self.bot.sound_requests["tok"].busy)
+        self.assertIn("tok", self.bot.extra_requests)
+        self.assertFalse(self.bot.extra_requests["tok"].busy)
         self.assertEqual(self.bot.api.markup_edits, [])
 
     def test_busy_queue_releases_the_button(self) -> None:
@@ -960,7 +1012,183 @@ class SoundButtonTests(unittest.TestCase):
 
         self.press()
 
-        self.assertFalse(self.bot.sound_requests["tok"].busy)
+        self.assertFalse(self.bot.extra_requests["tok"].busy)
+
+
+class GifButtonTests(unittest.TestCase):
+    URL = "https://www.tiktok.com/@bob/video/1"
+
+    def setUp(self) -> None:
+        self.video = DownloadedMedia(
+            paths=(make_media_file(".mp4"),), title="funny cat", uploader="Bob", webpage_url=self.URL, duration=12
+        )
+        self.downloader = FakeDownloader(self.video)
+        self.bot = make_bot(downloader=self.downloader)
+        self.bot.run_download_session(make_session(self.URL))
+        markup = self.bot.api.media[0]["reply_markup"]
+        self.token = markup["inline_keyboard"][0][0]["callback_data"][4:]
+        self.bot.api.media.clear()
+        self.gif_file = make_media_file(".mp4", size=7)
+        self.converted: list[tuple[Path, Path, int]] = []
+
+        def fake_convert(video: Path, directory: Path, *, max_seconds: int = 60, **_kwargs: Any) -> Path:
+            self.converted.append((video, directory, max_seconds))
+            return self.gif_file
+
+        patches = [
+            mock.patch("tiktok_downloader_bot.bot.convert_to_animation", fake_convert),
+            mock.patch("tiktok_downloader_bot.bot.probe_media", lambda _path: {"width": 480, "height": 854, "duration": 12}),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def press(self, action: str, *, message_id: int = 55, user_id: int = 300, lang: str | None = None) -> None:
+        sender: dict[str, Any] = {"id": user_id}
+        if lang:
+            sender["language_code"] = lang
+        self.bot.handle_callback_query(
+            {
+                "id": f"cb-{action}",
+                "from": sender,
+                "data": f"{action}:{self.token}",
+                "message": {"message_id": message_id, "chat": {"id": -100, "type": "supergroup"}},
+            }
+        )
+
+    def test_gif_button_downloads_a_small_copy_converts_and_sends_an_animation(self) -> None:
+        self.press("gif")
+
+        kwargs = self.downloader.calls[-1][1]
+        self.assertEqual((kwargs["format_selector"], kwargs["max_height"]), (quality_format_selector(480), 480))
+        self.assertFalse(kwargs.get("audio_only"))
+        self.assertEqual(self.converted[0][0], self.video.paths[0])
+        self.assertEqual(self.converted[0][2], 60)
+        sent = self.bot.api.media[0]
+        self.assertEqual((sent["kind"], sent["source"]), ("animation", self.gif_file))
+        self.assertEqual((sent["meta"].width, sent["meta"].height, sent["meta"].duration), (480, 854, 12))
+        self.assertTrue(sent["context"].silent)
+        self.assertIsNone(sent["context"].reply_to_message_id)
+        self.assertIn("Bob", sent["caption"])
+        self.assertNotIn("funny cat", sent["caption"])
+        self.assertEqual(self.bot.api.callback_answers, [("cb-gif", "Making the GIF…")])
+        self.assertEqual(self.bot.stats["gifs_sent"], 1)
+
+    def test_used_button_disappears_but_the_other_one_stays(self) -> None:
+        self.press("gif")
+
+        self.assertEqual(button_labels(self.bot.api.markup_values[-1]), ["🎵 Sound"])
+        self.assertIn(self.token, self.bot.extra_requests)
+
+        self.press("snd")
+
+        self.assertIsNone(self.bot.api.markup_values[-1])  # keyboard fully removed
+        self.assertNotIn(self.token, self.bot.extra_requests)
+        self.assertEqual([m["kind"] for m in self.bot.api.media], ["animation", "audio"])
+
+    def test_sound_first_then_gif_also_works(self) -> None:
+        self.downloader.media = DownloadedMedia(paths=(make_media_file(".mp3"),), title="s", uploader="Bob", is_audio_only=True)
+        self.press("snd")
+        self.assertEqual(button_labels(self.bot.api.markup_values[-1]), ["🎞 GIF"])
+
+        self.downloader.media = self.video
+        self.press("gif")
+        self.assertIsNone(self.bot.api.markup_values[-1])
+        self.assertEqual([m["kind"] for m in self.bot.api.media], ["audio", "animation"])
+
+    def test_a_used_button_cannot_be_used_twice(self) -> None:
+        self.press("gif")
+        calls = len(self.downloader.calls)
+
+        self.press("gif")
+
+        self.assertEqual(len(self.downloader.calls), calls)
+        self.assertEqual(self.bot.api.callback_answers[-1], ("cb-gif", "This download expired."))
+
+    def test_second_gif_is_served_from_the_file_id_cache(self) -> None:
+        self.press("gif")
+        self.bot.extra_requests[self.token] = ExtraRequest(
+            url=self.URL, context=ChatContext(chat_id=-100), created_at=time.time(), actions=["gif"]
+        )
+        calls = len(self.downloader.calls)
+
+        self.press("gif")
+
+        self.assertEqual(len(self.downloader.calls), calls)
+        self.assertEqual(self.bot.api.media[1]["source"], "file-2")  # file-1 was the original video
+        self.assertEqual(self.bot.api.media[1]["kind"], "animation")
+        self.assertEqual(len(self.converted), 1)
+
+    def test_busy_requests_are_not_started_twice(self) -> None:
+        self.bot.extra_requests[self.token].busy = True
+
+        self.press("gif")
+
+        self.assertEqual(self.converted, [])
+        self.assertEqual(self.bot.api.callback_answers[-1], ("cb-gif", "The GIF is already being made."))
+
+    def test_pressing_the_other_button_while_busy_says_so_instead_of_blaming_the_wrong_action(self) -> None:
+        request = self.bot.extra_requests[self.token]
+        request.busy = True
+        request.busy_action = "gif"
+
+        calls = len(self.downloader.calls)
+
+        self.press("snd")
+
+        self.assertEqual(len(self.downloader.calls), calls)
+        self.assertEqual(
+            self.bot.api.callback_answers[-1],
+            ("cb-snd", "The other button of this message is still being processed. Please wait a moment."),
+        )
+        self.press("gif")
+        self.assertEqual(self.bot.api.callback_answers[-1], ("cb-gif", "The GIF is already being made."))
+
+    def test_conversion_failures_are_reported_and_the_button_stays(self) -> None:
+        def broken(*_args: Any, **_kwargs: Any) -> Path:
+            raise RuntimeError("ffmpeg could not convert the video to a GIF: boom")
+
+        with mock.patch("tiktok_downloader_bot.bot.convert_to_animation", broken):
+            self.bot.config.admin_users = frozenset({1})
+            self.press("gif", lang="ru")
+
+        user_messages = [m for m in self.bot.api.messages if m[0] == -100 and "GIF" in m[1]]
+        self.assertTrue(user_messages[-1][1].startswith("Не удалось сделать GIF"))
+        self.assertEqual(self.bot.api.markup_values, [])  # keyboard untouched: both buttons stay
+        self.assertEqual(self.bot.extra_requests[self.token].actions, ["sound", "gif"])
+        self.assertFalse(self.bot.extra_requests[self.token].busy)
+        self.assertEqual(self.bot.api.media, [])
+        self.assertTrue(any(m[0] == 1 for m in self.bot.api.messages))  # unexpected -> admin notified
+
+    def test_oversized_gifs_are_rejected_before_upload(self) -> None:
+        self.bot.config.max_upload_bytes = 3
+
+        self.press("gif")
+
+        self.assertEqual(self.bot.api.media, [])
+        self.assertIn("too large", self.bot.api.messages[-1][1])
+
+    def test_non_video_downloads_are_not_converted(self) -> None:
+        self.downloader.media = DownloadedMedia(paths=(make_media_file(".jpg"),), title="p")
+
+        self.press("gif")
+
+        self.assertEqual(self.converted, [])
+        self.assertEqual(self.bot.api.media, [])
+
+    def test_unauthorized_private_users_cannot_press_it(self) -> None:
+        self.bot.config.authorized_users = frozenset({1})
+        self.bot.handle_callback_query(
+            {
+                "id": "cb",
+                "from": {"id": 5},
+                "data": f"gif:{self.token}",
+                "message": {"message_id": 55, "chat": {"id": 5, "type": "private"}},
+            }
+        )
+
+        self.assertEqual(self.converted, [])
+        self.assertEqual(self.bot.api.callback_answers[-1][1], "You are not authorized to use this bot.")
 
 
 class SettingsTests(unittest.TestCase):
@@ -980,7 +1208,7 @@ class SettingsTests(unittest.TestCase):
         text, markup = bot.api.messages[-1][1], bot.api.messages[-1][3]
         self.assertTrue(text.startswith("Settings for this chat"))
         callbacks = [row[0]["callback_data"] for row in markup["inline_keyboard"]]
-        self.assertEqual(callbacks, ["cfg:quality", "cfg:captions", "cfg:sound", "cfg:delete_original", "cfg:reply"])
+        self.assertEqual(callbacks, ["cfg:quality", "cfg:captions", "cfg:sound", "cfg:gif", "cfg:delete_original", "cfg:reply"])
 
     def test_group_settings_include_auto_download_and_require_admin(self) -> None:
         bot = make_bot()
@@ -1127,13 +1355,13 @@ class LifecycleTests(unittest.TestCase):
         busy.running = True
         fresh = make_session()
         bot.sessions.update({"old": old, "busy": busy, "fresh": fresh})
-        bot.sound_requests["old"] = SoundRequest(url="u", context=ChatContext(chat_id=1), created_at=0)
-        bot.sound_requests["new"] = SoundRequest(url="u", context=ChatContext(chat_id=1), created_at=time.time())
+        bot.extra_requests["old"] = ExtraRequest(url="u", context=ChatContext(chat_id=1), created_at=0)
+        bot.extra_requests["new"] = ExtraRequest(url="u", context=ChatContext(chat_id=1), created_at=time.time())
 
         bot.prune()
 
         self.assertEqual(set(bot.sessions), {"busy", "fresh"})
-        self.assertEqual(set(bot.sound_requests), {"new"})
+        self.assertEqual(set(bot.extra_requests), {"new"})
 
     def test_help_mentions_inline_only_when_it_is_configured(self) -> None:
         self.assertNotIn("@media_bot", help_text("en", "media_bot", False))

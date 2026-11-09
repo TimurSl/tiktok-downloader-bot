@@ -21,6 +21,8 @@ from .downloader import (
     MediaDownloader,
     ProgressInfo,
     QualityOption,
+    convert_to_animation,
+    probe_media,
     quality_format_selector,
 )
 from .errors import (
@@ -40,11 +42,14 @@ from .urls import cache_url, download_urls, first_download_url, is_tiktok_url, i
 LOG = logging.getLogger("tiktok_downloader_bot")
 
 PENDING_DOWNLOAD_TTL_SECONDS = 15 * 60
-SOUND_REQUEST_TTL_SECONDS = 24 * 60 * 60
-MAX_SOUND_REQUESTS = 2000
+EXTRA_REQUEST_TTL_SECONDS = 24 * 60 * 60
+MAX_EXTRA_REQUESTS = 2000
 ADMIN_NOTICE_INTERVAL_SECONDS = 30
 PRUNE_INTERVAL_SECONDS = 60
 PROGRESS_EDIT_INTERVAL_SECONDS = 3.0
+GIF_MAX_SECONDS = 60  # longer videos get no GIF button
+GIF_SOURCE_HEIGHT = 480  # the video is fetched at this height at most: GIFs are small anyway
+EXTRA_ACTIONS = {"snd": "sound", "gif": "gif"}
 COMMAND_LANGUAGES = (None, "ru", "uk")
 SETTING_KEYS_GROUP_ONLY = {"auto"}
 
@@ -119,14 +124,16 @@ class DownloadSession:
 
 
 @dataclass
-class SoundRequest:
-    """What the 🎵 button of a delivered post needs to fetch its sound later."""
+class ExtraRequest:
+    """What the optional buttons (🎵 sound, 🎞 GIF) of a delivered post need later."""
 
     url: str
     context: ChatContext
     created_at: float
-    is_helper: bool = False  # the button lives on a separate helper message (albums)
+    is_helper: bool = False  # the buttons live on a separate helper message (albums)
     busy: bool = False
+    busy_action: str | None = None  # which button is being processed while busy
+    actions: list[str] = field(default_factory=lambda: ["sound"])  # buttons still available
 
 
 class ProgressReporter:
@@ -284,7 +291,7 @@ class DownloaderBot:
         self.polling = False
         self.bot_username = ""
         self.sessions: dict[str, DownloadSession] = {}
-        self.sound_requests: OrderedDict[str, SoundRequest] = OrderedDict()
+        self.extra_requests: OrderedDict[str, ExtraRequest] = OrderedDict()
         self.state_lock = threading.Lock()
         self.started_at = time.time()
         self.stats: Counter[str] = Counter()
@@ -364,9 +371,9 @@ class DownloaderBot:
             for token, session in list(self.sessions.items()):
                 if not session.running and session.created_at < now - PENDING_DOWNLOAD_TTL_SECONDS:
                     self.sessions.pop(token, None)
-            for token, request in list(self.sound_requests.items()):
-                if request.created_at < now - SOUND_REQUEST_TTL_SECONDS and not request.busy:
-                    self.sound_requests.pop(token, None)
+            for token, request in list(self.extra_requests.items()):
+                if request.created_at < now - EXTRA_REQUEST_TTL_SECONDS and not request.busy:
+                    self.extra_requests.pop(token, None)
 
     def prune_sessions(self) -> None:
         self.prune()
@@ -608,7 +615,7 @@ class DownloaderBot:
         try:
             items = [(str(kind), str(file_id)) for kind, file_id in entry["items"]]
             caption, parse_mode = self.caption_for(session, entry, items)
-            markup = self.sound_markup(session, [kind for kind, _ in items])
+            markup = self.extras_markup(session, [kind for kind, _ in items], entry.get("duration"))
             self.send_items(session, items, caption=caption, parse_mode=parse_mode, markup=markup)
             self.send_sound_helper(session, [kind for kind, _ in items])
         except (TelegramAPIError, KeyError, ValueError, TypeError) as exc:
@@ -644,6 +651,7 @@ class DownloaderBot:
             "title": media.title,
             "uploader": media.uploader,
             "url": media.webpage_url or session.url,
+            "duration": media.duration,
         }
         caption, parse_mode = self.caption_for(session, entry, [(kinds[0], "")])
 
@@ -657,7 +665,7 @@ class DownloaderBot:
                 duration=media.duration, title=media.title, performer=media.performer or media.uploader
             )
 
-        markup = self.sound_markup(session, kinds)
+        markup = self.extras_markup(session, kinds, media.duration)
         uploaded = self.send_items(session, items, caption=caption, parse_mode=parse_mode, meta=meta, markup=markup)
         self.send_sound_helper(session, kinds)
         self.file_cache.put(
@@ -722,7 +730,7 @@ class DownloaderBot:
             max_mb = max_upload_bytes / 1024 / 1024
             raise TooLargeError(f"file is {mb:.1f} MB, max upload is {max_mb:.0f} MB")
 
-    # ------------------------------------------------------------------ sound button
+    # ------------------------------------------------------------------ extra buttons (sound, GIF)
 
     def wants_sound(self, session: DownloadSession, kinds: list[str]) -> bool:
         """The 🎵 button is offered for single videos and TikTok photo posts, never sent unasked."""
@@ -734,36 +742,68 @@ class DownloaderBot:
             return True
         return is_tiktok_url(session.url) and all(kind == "photo" for kind in kinds)
 
-    def register_sound(self, session: DownloadSession, *, is_helper: bool) -> dict[str, Any]:
+    def wants_gif(self, session: DownloadSession, kinds: list[str], duration: int | None) -> bool:
+        """The 🎞 button is offered for single videos that are short enough to be a GIF."""
+        if not session.settings.get("gif", True) or session.is_audio:
+            return False
+        return kinds == ["video"] and (not duration or duration <= GIF_MAX_SECONDS)
+
+    def extras_keyboard(self, lang: str, token: str, actions: list[str]) -> dict[str, Any] | None:
+        labels = {"sound": ("btn_sound", "snd"), "gif": ("btn_gif", "gif")}
+        buttons = [
+            {"text": tr(lang, labels[action][0]), "callback_data": f"{labels[action][1]}:{token}"}
+            for action in ("sound", "gif")
+            if action in actions
+        ]
+        return {"inline_keyboard": [buttons]} if buttons else None
+
+    def register_extras(self, session: DownloadSession, actions: list[str], *, is_helper: bool) -> dict[str, Any] | None:
+        if not actions:
+            return None
         token = uuid.uuid4().hex[:12]
         with self.state_lock:
-            self.sound_requests[token] = SoundRequest(
-                url=session.url, context=session.context, created_at=time.time(), is_helper=is_helper
+            self.extra_requests[token] = ExtraRequest(
+                url=session.url,
+                context=session.context,
+                created_at=time.time(),
+                is_helper=is_helper,
+                actions=list(actions),
             )
-            while len(self.sound_requests) > MAX_SOUND_REQUESTS:
-                self.sound_requests.popitem(last=False)
-        return {
-            "inline_keyboard": [
-                [{"text": tr(session.context.lang, "btn_sound"), "callback_data": f"snd:{token}"}]
-            ]
-        }
+            while len(self.extra_requests) > MAX_EXTRA_REQUESTS:
+                self.extra_requests.popitem(last=False)
+        return self.extras_keyboard(session.context.lang, token, actions)
 
-    def sound_markup(self, session: DownloadSession, kinds: list[str]) -> dict[str, Any] | None:
-        """Button attached directly to the media message (single files only)."""
-        if len(kinds) == 1 and self.wants_sound(session, kinds):
-            return self.register_sound(session, is_helper=False)
-        return None
+    def extras_markup(
+        self, session: DownloadSession, kinds: list[str], duration: int | None = None
+    ) -> dict[str, Any] | None:
+        """Buttons attached directly to the media message (single files only)."""
+        if len(kinds) != 1:
+            return None
+        actions = []
+        if self.wants_sound(session, kinds):
+            actions.append("sound")
+        if self.wants_gif(session, kinds, duration):
+            actions.append("gif")
+        return self.register_extras(session, actions, is_helper=False)
 
     def send_sound_helper(self, session: DownloadSession, kinds: list[str]) -> None:
         """Albums cannot carry a button, so offer the sound in a small silent follow-up."""
         if len(kinds) > 1 and self.wants_sound(session, kinds):
-            markup = self.register_sound(session, is_helper=True)
+            markup = self.register_extras(session, ["sound"], is_helper=True)
             self.api.send_message(session.context, tr(session.context.lang, "sound_prompt"), reply_markup=markup)
 
-    def handle_sound_callback(self, callback_query: dict[str, Any], callback_id: str, token: str, lang: str) -> None:
-        request = self.sound_requests.get(token)
-        if not request or time.time() - request.created_at > SOUND_REQUEST_TTL_SECONDS:
-            self.sound_requests.pop(token, None)
+    def handle_extra_callback(
+        self, callback_query: dict[str, Any], callback_id: str, prefix: str, token: str, lang: str
+    ) -> None:
+        action = EXTRA_ACTIONS[prefix]
+        request = self.extra_requests.get(token)
+        if (
+            not request
+            or action not in request.actions
+            or time.time() - request.created_at > EXTRA_REQUEST_TTL_SECONDS
+        ):
+            if request and action in request.actions:
+                self.extra_requests.pop(token, None)
             self.answer_callback(callback_id, tr(lang, "cb_expired"))
             return
 
@@ -774,54 +814,75 @@ class DownloaderBot:
             self.answer_callback(callback_id, tr(lang, "not_authorized"))
             return
         if request.busy:
-            self.answer_callback(callback_id, tr(lang, "sound_busy"))
+            same = request.busy_action in {None, action}
+            self.answer_callback(callback_id, tr(lang, f"{action}_busy" if same else "extra_busy"))
             return
 
         request.busy = True
-        self.answer_callback(callback_id, tr(lang, "sound_sending"))
+        request.busy_action = action
+        self.answer_callback(callback_id, tr(lang, f"{action}_sending"))
         message_id = message.get("message_id")
         context = replace(request.context, lang=lang, requester_id=user_id)
         queued = self.queue_job(
             context,
-            lambda: self.run_sound_job(token, request, context, int(message_id) if message_id else None),
+            lambda: self.run_extra_job(token, request, action, context, int(message_id) if message_id else None),
         )
         if not queued:
             request.busy = False
+            request.busy_action = None
 
-    def run_sound_job(
+    def run_extra_job(
         self,
         token: str,
-        request: SoundRequest,
+        request: ExtraRequest,
+        action: str,
         context: ChatContext,
         message_id: int | None,
     ) -> None:
         settings = self.settings.get(context.chat_id)
         send_context = context.with_reply(message_id if settings["reply"] else None)
-        key = cache_key("audio", request.url)
+        captions = bool(settings["captions"])
         try:
-            self.send_sound(send_context, request.url, key, captions=bool(settings["captions"]))
-            self.stats["sounds_sent"] += 1
+            if action == "gif":
+                self.send_gif(send_context, request.url, cache_key("gif", request.url), captions=captions)
+                self.stats["gifs_sent"] += 1
+            else:
+                self.send_sound(send_context, request.url, cache_key("audio", request.url), captions=captions)
+                self.stats["sounds_sent"] += 1
+            request.actions.remove(action)
             if message_id:
-                if request.is_helper:
-                    self.api.delete_message(context, message_id)
-                else:
-                    try:
-                        self.api.edit_message_reply_markup(context, message_id)
-                    except TelegramAPIError:
-                        LOG.debug("Could not remove the sound button", exc_info=True)
-            with self.state_lock:
-                self.sound_requests.pop(token, None)
+                self.refresh_extra_buttons(token, request, context, message_id)
+            if not request.actions:
+                with self.state_lock:
+                    self.extra_requests.pop(token, None)
         except Exception as exc:
-            LOG.exception("Sound download failed")
+            LOG.exception("%s job failed", action)
             reason = friendly_error_message(exc, context.lang)
             try:
-                self.api.send_message(context, tr(context.lang, "sound_failed", reason=reason))
+                self.api.send_message(context, tr(context.lang, f"{action}_failed", reason=reason))
             except TelegramAPIError:
-                LOG.debug("Could not report the sound failure", exc_info=True)
+                LOG.debug("Could not report the %s failure", action, exc_info=True)
             if error_key(exc) not in EXPECTED_ERROR_KEYS:
-                self.notify_admins(f"Sound download failed\nURL: {request.url}\n{exc!r}"[:3500])
+                self.notify_admins(f"{action} job failed\nURL: {request.url}\n{exc!r}"[:3500])
         finally:
             request.busy = False
+            request.busy_action = None
+
+    def refresh_extra_buttons(
+        self, token: str, request: ExtraRequest, context: ChatContext, message_id: int
+    ) -> None:
+        """Drop the button that was just used; remove the keyboard (or helper message) when none is left."""
+        if request.actions:
+            markup = self.extras_keyboard(context.lang, token, request.actions)
+        elif request.is_helper:
+            self.api.delete_message(context, message_id)
+            return
+        else:
+            markup = None
+        try:
+            self.api.edit_message_reply_markup(context, message_id, markup)
+        except TelegramAPIError:
+            LOG.debug("Could not update the buttons", exc_info=True)
 
     def send_sound(self, context: ChatContext, url: str, key: str, *, captions: bool) -> None:
         entry = self.file_cache.get(key)
@@ -859,6 +920,49 @@ class DownloaderBot:
                 },
             )
 
+    def send_gif(self, context: ChatContext, url: str, key: str, *, captions: bool) -> None:
+        """Send the video as a Telegram animation (silent, looping: what Telegram shows as a GIF)."""
+        entry = self.file_cache.get(key)
+        if entry:
+            try:
+                _kind, file_id = entry["items"][0]
+                caption, parse_mode = build_caption("", str(entry.get("uploader") or ""), str(entry.get("url") or url), enabled=captions)
+                self.api.send_media(context, str(file_id), kind="animation", caption=caption, parse_mode=parse_mode)
+                return
+            except (TelegramAPIError, KeyError, IndexError, ValueError, TypeError):
+                LOG.info("Cached GIF for %s was rejected; converting again", url)
+                self.file_cache.discard(key)
+
+        with self.downloader.download(
+            url,
+            format_selector=quality_format_selector(GIF_SOURCE_HEIGHT),
+            max_height=GIF_SOURCE_HEIGHT,
+        ) as media:
+            if media.kinds != ("video",):
+                raise RuntimeError("yt-dlp completed without a usable media output file")
+            animation = convert_to_animation(media.path, media.path.parent / "gif", max_seconds=GIF_MAX_SECONDS)
+            self.ensure_size(animation)
+            probed = probe_media(animation)
+            caption, parse_mode = build_caption("", media.uploader, media.webpage_url or url, enabled=captions)
+            message = self.api.send_media(
+                context,
+                animation,
+                kind="animation",
+                caption=caption,
+                parse_mode=parse_mode,
+                meta=MediaMeta(width=probed.get("width"), height=probed.get("height"), duration=probed.get("duration")),
+            )
+            kind, file_id = extract_file_id(message, "animation")
+            self.file_cache.put(
+                key,
+                {
+                    "items": [[kind, file_id]],
+                    "title": media.title,
+                    "uploader": media.uploader,
+                    "url": media.webpage_url or url,
+                },
+            )
+
     # ------------------------------------------------------------------ callbacks
 
     def answer_callback(self, callback_id: str, text: str = "", *, alert: bool = False) -> None:
@@ -874,8 +978,8 @@ class DownloaderBot:
         data = str(callback_query.get("data") or "")
         lang = normalize_lang((callback_query.get("from") or {}).get("language_code"))
 
-        if data.startswith("snd:"):
-            self.handle_sound_callback(callback_query, callback_id, data[4:], lang)
+        if data[:4] in {"snd:", "gif:"}:
+            self.handle_extra_callback(callback_query, callback_id, data[:3], data[4:], lang)
             return
         if data.startswith("cfg:"):
             self.handle_settings_callback(callback_query, callback_id, data[4:], lang)
@@ -1202,9 +1306,9 @@ class DownloaderBot:
             f"Jobs: {running} running, {queued} queued",
             f"Downloads: {self.stats['downloads_ok']} ok, {self.stats['downloads_failed']} failed",
             f"Cache hits: {self.stats['cache_hits']} (entries: {len(self.file_cache)})",
-            f"Sounds sent: {self.stats['sounds_sent']}",
+            f"Sounds sent: {self.stats['sounds_sent']}, GIFs sent: {self.stats['gifs_sent']}",
             f"Inline downloads: {self.stats['inline_ok']}",
-            f"Open sessions: {len(self.sessions)}, sound buttons: {len(self.sound_requests)}",
+            f"Open sessions: {len(self.sessions)}, extra buttons: {len(self.extra_requests)}",
             f"Chats with custom settings: {self.settings.chat_count()}",
         ]
         return "\n".join(lines)
@@ -1232,6 +1336,7 @@ def settings_keyboard(lang: str, values: dict[str, Any], *, group: bool) -> dict
         [(f"{tr(lang, 'set_quality')}: {quality_setting_label(lang, values['quality'])}", "cfg:quality")],
         [(f"{tr(lang, 'set_captions')}: {onoff('captions')}", "cfg:captions")],
         [(f"{tr(lang, 'set_sound')}: {onoff('sound')}", "cfg:sound")],
+        [(f"{tr(lang, 'set_gif')}: {onoff('gif')}", "cfg:gif")],
     ]
     if group:
         rows.append([(f"{tr(lang, 'set_auto')}: {onoff('auto')}", "cfg:auto")])
