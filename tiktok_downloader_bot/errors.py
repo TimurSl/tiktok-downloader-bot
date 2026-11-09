@@ -57,7 +57,12 @@ def error_key(exc: BaseException) -> str:
         return "unavailable"
     if any(
         needle in lower
-        for needle in ("without a usable output file", "without a usable media output file", "did not expose")
+        for needle in (
+            "without a usable output file",
+            "without a usable media output file",
+            "did not expose",
+            "no video could be found",
+        )
     ):
         return "no_media"
     if isinstance(exc, TimeoutError) or "timed out" in lower or "timeout" in lower:

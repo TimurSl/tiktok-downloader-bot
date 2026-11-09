@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,6 +61,18 @@ from tiktok_downloader_bot.tiktok import (
     extract_tiktok_item_struct,
     extract_tiktok_music,
     extract_tiktok_rehydration_data,
+)
+from tiktok_downloader_bot.twitter import (
+    clean_tweet_text,
+    is_no_video_error,
+    is_twitter_url,
+    normalize_twitter_url,
+    original_photo_url,
+    parse_fxtwitter,
+    parse_syndication,
+    syndication_token,
+    twitter_screen_name,
+    twitter_status_id,
 )
 from tiktok_downloader_bot.urls import (
     cache_url,
@@ -811,3 +824,307 @@ class GifConversionTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "could not convert"):
                 convert_to_animation(broken, Path(tmp) / "gif")
+
+
+SYNDICATION_PHOTOS = {
+    "id_str": "1788888888888888888",
+    "text": "two photos &amp; a caption https://t.co/AbCdEf123",
+    "user": {"name": "Jack", "screen_name": "jack"},
+    "mediaDetails": [
+        {"type": "photo", "media_url_https": "https://pbs.twimg.com/media/AAA.jpg"},
+        {"type": "photo", "media_url_https": "https://pbs.twimg.com/media/BBB.png"},
+    ],
+    "photos": [{"url": "https://pbs.twimg.com/media/AAA.jpg"}, {"url": "https://pbs.twimg.com/media/BBB.png"}],
+}
+FXTWITTER_PHOTOS = {
+    "code": 200,
+    "tweet": {
+        "text": "from fx",
+        "author": {"name": "Jack", "screen_name": "jack"},
+        "media": {"photos": [{"type": "photo", "url": "https://pbs.twimg.com/media/CCC.jpg"}]},
+    },
+}
+
+
+class TwitterParsingTests(unittest.TestCase):
+    def test_status_urls_and_mirrors(self) -> None:
+        self.assertEqual(twitter_status_id("https://x.com/jack/status/20/photo/1?s=20"), "20")
+        self.assertEqual(twitter_status_id("https://twitter.com/i/web/status/99"), "99")
+        self.assertEqual(twitter_status_id("https://mobile.twitter.com/jack/statuses/7"), "7")
+        self.assertIsNone(twitter_status_id("https://x.com/jack"))
+        self.assertEqual(twitter_screen_name("https://x.com/jack/status/20"), "jack")
+        self.assertIsNone(twitter_screen_name("https://x.com/i/status/20"))
+        self.assertTrue(all(is_twitter_url(u) for u in ("https://x.com/a/status/1", "https://www.twitter.com/a/status/1", "https://fxtwitter.com/a/status/1")))
+        self.assertFalse(is_twitter_url("https://example.test/a/status/1"))
+
+    def test_link_preview_mirrors_are_pointed_back_at_x(self) -> None:
+        self.assertEqual(normalize_twitter_url("https://fxtwitter.com/jack/status/20?s=1"), "https://x.com/jack/status/20")
+        self.assertEqual(normalize_twitter_url("https://www.vxtwitter.com/jack/status/20"), "https://x.com/jack/status/20")
+        self.assertEqual(normalize_twitter_url("https://twitter.com/jack/status/20?s=1"), "https://twitter.com/jack/status/20?s=1")
+        self.assertEqual(download_urls("https://fixupx.com/jack/status/20"), ["https://fixupx.com/jack/status/20"])
+
+    def test_syndication_token_is_base36_without_zeros_or_dots(self) -> None:
+        for twid in ("20", "1788888888888888888", "1999999999999999999"):
+            token = syndication_token(twid)
+            self.assertTrue(token and token.isalnum() and "0" not in token, token)
+
+    def test_parses_photos_text_and_author_from_syndication(self) -> None:
+        post = parse_syndication(SYNDICATION_PHOTOS)
+
+        self.assertEqual(post.photo_urls, ("https://pbs.twimg.com/media/AAA.jpg", "https://pbs.twimg.com/media/BBB.png"))
+        self.assertEqual((post.text, post.author), ("two photos & a caption", "Jack"))
+
+    def test_syndication_ignores_videos_tombstones_and_garbage(self) -> None:
+        video_only = {"text": "v", "mediaDetails": [{"type": "video", "media_url_https": "https://pbs.twimg.com/amplify/x.jpg"}]}
+        self.assertEqual(parse_syndication(video_only).photo_urls, ())
+        self.assertIsNone(parse_syndication({"__typename": "TweetTombstone"}))
+        self.assertIsNone(parse_syndication({}))
+        self.assertIsNone(parse_syndication("nope"))
+        only_photos_key = {"text": "t", "photos": [{"url": "https://pbs.twimg.com/media/Z.jpg"}]}
+        self.assertEqual(parse_syndication(only_photos_key).photo_urls, ("https://pbs.twimg.com/media/Z.jpg",))
+
+    def test_parses_fxtwitter_answers(self) -> None:
+        post = parse_fxtwitter(FXTWITTER_PHOTOS)
+        self.assertEqual((post.photo_urls, post.text, post.author), (("https://pbs.twimg.com/media/CCC.jpg",), "from fx", "Jack"))
+
+        via_all = {"tweet": {"text": "t", "media": {"all": [{"type": "video", "url": "v"}, {"type": "photo", "url": "https://pbs.twimg.com/media/D.jpg"}]}}}
+        self.assertEqual(parse_fxtwitter(via_all).photo_urls, ("https://pbs.twimg.com/media/D.jpg",))
+        self.assertIsNone(parse_fxtwitter({"code": 404}))
+
+    def test_text_and_photo_url_helpers(self) -> None:
+        self.assertEqual(clean_tweet_text("a &lt;b&gt; https://t.co/x1 https://t.co/y2"), "a <b>")
+        self.assertEqual(clean_tweet_text("see https://t.co/x1 later"), "see https://t.co/x1 later")
+        self.assertEqual(original_photo_url("https://pbs.twimg.com/media/AAA.jpg"), "https://pbs.twimg.com/media/AAA.jpg?name=orig")
+        self.assertEqual(original_photo_url("https://pbs.twimg.com/media/AAA.jpg?name=small", size="large"), "https://pbs.twimg.com/media/AAA.jpg?name=large")
+        self.assertEqual(original_photo_url("https://example.test/a.jpg"), "https://example.test/a.jpg")
+        self.assertTrue(is_no_video_error(RuntimeError("ERROR: [twitter:1] 1: No video could be found in this tweet")))
+        self.assertFalse(is_no_video_error(RuntimeError("HTTP Error 500")))
+
+    def test_tweets_without_video_are_reported_as_missing_media(self) -> None:
+        exc = RuntimeError("ERROR: [twitter] 1: No video could be found in this tweet")
+        self.assertEqual(friendly_error_message(exc), "Could not find downloadable media metadata.")
+        self.assertEqual(friendly_error_message(RuntimeError("Tweet did not expose any photos")), "Could not find downloadable media metadata.")
+
+
+class FakeResponse:
+    def __init__(self, *, json_data=None, content: bytes = b"", headers=None, status: int = 200) -> None:
+        self._json = json_data
+        self.content = content
+        self.headers = headers or {}
+        self.status = status
+
+    def raise_for_status(self) -> None:
+        if self.status >= 400:
+            import requests
+
+            raise requests.HTTPError(f"HTTP Error {self.status}")
+
+    def json(self):
+        return self._json
+
+    def iter_content(self, chunk_size: int = 1):
+        yield self.content
+
+
+class FakeSession:
+    """Answers by URL prefix; records what was requested."""
+
+    def __init__(self, routes) -> None:
+        self.routes = routes
+        self.requests: list[str] = []
+
+    def get(self, url, params=None, headers=None, stream=False, timeout=None):
+        self.requests.append(url if not params else f"{url}?{'&'.join(f'{k}={v}' for k, v in params.items())}")
+        for prefix, response in self.routes:
+            if url.startswith(prefix):
+                return response() if callable(response) else response
+        raise AssertionError(f"unexpected request {url}")
+
+
+def twitter_downloader(routes, tmp: str) -> tuple[MediaDownloader, FakeSession]:
+    downloader = MediaDownloader.__new__(MediaDownloader)
+    downloader.config = SimpleNamespace(
+        download_dir=Path(tmp), ytdlp_format="bv*+ba/best", ytdlp_no_playlist=True,
+        ytdlp_cookies=None, ytdlp_cookies_from_browser=None,
+        api_base="https://api.telegram.org", max_upload_bytes=50 * 1024 * 1024,
+    )
+    session = FakeSession(routes)
+    downloader._local = threading.local()
+    downloader._local.session = session
+    return downloader, session
+
+
+class TwitterPhotoDownloadTests(unittest.TestCase):
+    URL = "https://x.com/jack/status/1788888888888888888"
+
+    def image_routes(self):
+        return [
+            ("https://pbs.twimg.com/media/AAA.jpg", FakeResponse(content=b"A" * 10, headers={"Content-Type": "image/jpeg"})),
+            ("https://pbs.twimg.com/media/BBB.png", FakeResponse(content=b"B" * 20, headers={"Content-Type": "image/png"})),
+            ("https://pbs.twimg.com/media/CCC.jpg", FakeResponse(content=b"C" * 5, headers={"Content-Type": "image/jpeg"})),
+        ]
+
+    def test_photos_come_from_the_syndication_endpoint_in_original_size_and_order(self) -> None:
+        routes = [("https://cdn.syndication.twimg.com/", FakeResponse(json_data=SYNDICATION_PHOTOS))] + self.image_routes()
+        with tempfile.TemporaryDirectory() as tmp:
+            downloader, session = twitter_downloader(routes, tmp)
+
+            media = downloader.download_twitter_photos(self.URL, Path(tmp))
+
+            self.assertEqual([p.name for p in media.paths], ["tweet-photo-001.jpg", "tweet-photo-002.png"])
+            self.assertEqual([p.read_bytes()[:1] for p in media.paths], [b"A", b"B"])
+            self.assertEqual((media.title, media.uploader, media.webpage_url), ("two photos & a caption", "Jack", self.URL))
+            self.assertTrue(media.is_album)
+            self.assertTrue(session.requests[0].startswith("https://cdn.syndication.twimg.com/tweet-result?id=1788888888888888888&token="))
+            self.assertEqual(session.requests[1:], ["https://pbs.twimg.com/media/AAA.jpg?name=orig", "https://pbs.twimg.com/media/BBB.png?name=orig"])
+
+    def test_single_photo_tweet_is_a_single_photo(self) -> None:
+        data = {**SYNDICATION_PHOTOS, "mediaDetails": SYNDICATION_PHOTOS["mediaDetails"][:1]}
+        routes = [("https://cdn.syndication.twimg.com/", FakeResponse(json_data=data))] + self.image_routes()
+        with tempfile.TemporaryDirectory() as tmp:
+            downloader, _session = twitter_downloader(routes, tmp)
+
+            media = downloader.download_twitter_photos(self.URL, Path(tmp))
+
+            self.assertEqual(len(media.paths), 1)
+            self.assertFalse(media.is_album)
+            self.assertEqual(media.kinds, ("photo",))
+
+    def test_falls_back_to_fxtwitter_when_syndication_fails_or_is_a_tombstone(self) -> None:
+        for syndication in (FakeResponse(status=500), FakeResponse(json_data={"__typename": "TweetTombstone"})):
+            with self.subTest(syndication=syndication.status), tempfile.TemporaryDirectory() as tmp:
+                routes = [
+                    ("https://cdn.syndication.twimg.com/", syndication),
+                    ("https://api.fxtwitter.com/", FakeResponse(json_data=FXTWITTER_PHOTOS)),
+                ] + self.image_routes()
+                downloader, session = twitter_downloader(routes, tmp)
+
+                media = downloader.download_twitter_photos(self.URL, Path(tmp))
+
+                self.assertEqual([p.read_bytes() for p in media.paths], [b"C" * 5])
+                self.assertIn("https://api.fxtwitter.com/jack/status/1788888888888888888", session.requests)
+
+    def test_text_only_tweets_do_not_hit_the_third_party_api(self) -> None:
+        routes = [
+            ("https://cdn.syndication.twimg.com/", FakeResponse(json_data={"text": "just words", "user": {"name": "Jack"}})),
+            ("https://api.fxtwitter.com/", lambda: (_ for _ in ()).throw(AssertionError("must not be called"))),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            downloader, session = twitter_downloader(routes, tmp)
+
+            with self.assertRaisesRegex(RuntimeError, "did not expose any photos"):
+                downloader.download_twitter_photos(self.URL, Path(tmp))
+            self.assertEqual(len(session.requests), 1)
+
+    def test_unreadable_tweets_report_both_failures(self) -> None:
+        routes = [
+            ("https://cdn.syndication.twimg.com/", FakeResponse(status=403)),
+            ("https://api.fxtwitter.com/", FakeResponse(json_data={"code": 404})),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            downloader, _session = twitter_downloader(routes, tmp)
+
+            with self.assertRaisesRegex(RuntimeError, r"Could not read the tweet \(syndication: .*; fxtwitter: no tweet data\)"):
+                downloader.download_twitter_photos(self.URL, Path(tmp))
+
+    def test_photos_too_big_for_telegram_are_refetched_in_large_size(self) -> None:
+        routes = [
+            ("https://pbs.twimg.com/media/AAA.jpg?name=orig", FakeResponse(content=b"O" * 100, headers={"Content-Type": "image/jpeg"})),
+            ("https://pbs.twimg.com/media/AAA.jpg?name=large", FakeResponse(content=b"L" * 10, headers={"Content-Type": "image/jpeg"})),
+        ]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("tiktok_downloader_bot.downloader.TELEGRAM_PHOTO_MAX_BYTES", 50):
+            downloader, session = twitter_downloader(routes, tmp)
+
+            path = downloader.download_twitter_image("https://pbs.twimg.com/media/AAA.jpg", Path(tmp), index=1)
+
+            self.assertEqual(path.read_bytes(), b"L" * 10)
+            self.assertEqual(len(session.requests), 2)
+
+    def test_bad_status_links_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            downloader, _session = twitter_downloader([], tmp)
+            with self.assertRaisesRegex(RuntimeError, "not a tweet link"):
+                downloader.download_twitter_photos("https://x.com/jack", Path(tmp))
+
+
+class TwitterFallbackFlowTests(unittest.TestCase):
+    """yt-dlp cannot download photo tweets: the downloader must fall back to the photos."""
+
+    URL = "https://x.com/jack/status/1788888888888888888"
+    NO_VIDEO = RuntimeError("ERROR: [twitter] 1788888888888888888: No video could be found in this tweet")
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        routes = [
+            ("https://cdn.syndication.twimg.com/", FakeResponse(json_data=SYNDICATION_PHOTOS)),
+            ("https://pbs.twimg.com/media/AAA.jpg", FakeResponse(content=b"A", headers={"Content-Type": "image/jpeg"})),
+            ("https://pbs.twimg.com/media/BBB.png", FakeResponse(content=b"B", headers={"Content-Type": "image/png"})),
+        ]
+        self.downloader, self.session = twitter_downloader(routes, self.tmp.name)
+        self.attempts: list[str] = []
+
+    def failing_ytdlp(self, error: BaseException):
+        def run(_self, download_url, attempt_dir, strategy, **_kwargs):
+            self.attempts.append(strategy.name)
+            raise error
+
+        return mock.patch.object(MediaDownloader, "run_ytdlp", run)
+
+    def test_photo_tweet_is_downloaded_after_one_ytdlp_attempt(self) -> None:
+        with self.failing_ytdlp(self.NO_VIDEO), self.downloader.download(self.URL) as media:
+            self.assertEqual(len(media.paths), 2)
+            self.assertEqual(media.kinds, ("photo", "photo"))
+            self.assertTrue(all(path.exists() for path in media.paths))
+            job_dir = media.paths[0].parent
+
+        self.assertEqual(self.attempts, ["requested"])
+        self.assertFalse(job_dir.exists())  # temp files are cleaned up
+
+    def test_mirror_links_are_rewritten_to_x_before_downloading(self) -> None:
+        seen: list[str] = []
+
+        def fake(_self, download_url, job_dir, **_kwargs):
+            seen.append(download_url)
+            return DownloadedMedia(paths=(), title="t")
+
+        with mock.patch.object(MediaDownloader, "download_with_ytdlp", fake):
+            with self.downloader.download("https://fxtwitter.com/jack/status/20?s=1"):
+                pass
+
+        self.assertEqual(seen, ["https://x.com/jack/status/20"])
+
+    def test_tweets_without_video_or_photos_fail_fast_with_a_clear_reason(self) -> None:
+        self.session.routes[0] = ("https://cdn.syndication.twimg.com/", FakeResponse(json_data={"text": "words"}))
+
+        with self.failing_ytdlp(self.NO_VIDEO), self.assertRaises(RuntimeError) as caught:
+            with self.downloader.download(self.URL):
+                pass
+
+        self.assertEqual(self.attempts, ["requested"])  # no pointless format retries
+        self.assertEqual(friendly_error_message(caught.exception), "Could not find downloadable media metadata.")
+
+    def test_other_ytdlp_failures_still_try_the_remaining_format_strategies(self) -> None:
+        self.session.routes[0] = ("https://cdn.syndication.twimg.com/", FakeResponse(status=500))
+        self.session.routes.insert(1, ("https://api.fxtwitter.com/", FakeResponse(status=500)))
+
+        with self.failing_ytdlp(RuntimeError("HTTP Error 500")), self.assertRaises(RuntimeError):
+            with self.downloader.download(self.URL):
+                pass
+
+        self.assertGreater(len(self.attempts), 1)
+        self.assertEqual(len([r for r in self.session.requests if "syndication" in r]), 1)  # photo fallback only once
+
+    def test_audio_requests_never_use_the_photo_fallback(self) -> None:
+        with self.failing_ytdlp(self.NO_VIDEO), self.assertRaises(RuntimeError):
+            with self.downloader.download(self.URL, audio_only=True):
+                pass
+
+        self.assertEqual(self.session.requests, [])
+
+    def test_non_twitter_links_do_not_use_the_fallback(self) -> None:
+        with self.failing_ytdlp(self.NO_VIDEO), self.assertRaises(RuntimeError):
+            with self.downloader.download("https://www.instagram.com/p/abc/"):
+                pass
+
+        self.assertEqual(self.session.requests, [])
