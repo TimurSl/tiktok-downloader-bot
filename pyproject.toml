@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "telegram-automation-bot"
-version = "1.0.0"
-description = "Telegram media downloader bot with guest mode support"
+name = "tiktok-downloader-bot"
+version = "2.0.0"
+description = "Telegram media downloader bot (TikTok, YouTube, Instagram and more)"
 requires-python = ">=3.10"
 dependencies = [
   "python-dotenv>=1.0.0",
@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-telegram-automation-bot = "telegram_automation_bot.bot:main"
+tiktok-downloader-bot = "tiktok_downloader_bot.bot:main"
 
 [tool.setuptools.packages.find]
-include = ["telegram_automation_bot*"]
+include = ["tiktok_downloader_bot*"]
