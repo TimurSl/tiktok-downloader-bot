@@ -35,6 +35,23 @@ from .tiktok import (
     extract_tiktok_music,
     extract_tiktok_rehydration_data,
 )
+from .twitter import (
+    API_HEADERS,
+    FXTWITTER_API,
+    IMAGE_HEADERS,
+    SYNDICATION_URL,
+    TELEGRAM_PHOTO_MAX_BYTES,
+    TweetPost,
+    is_no_video_error,
+    is_twitter_url,
+    normalize_twitter_url,
+    original_photo_url,
+    parse_fxtwitter,
+    parse_syndication,
+    syndication_token,
+    twitter_screen_name,
+    twitter_status_id,
+)
 from .urls import is_tiktok_photo_url, is_tiktok_redirect_url, is_tiktok_url, tiktok_photo_id
 
 LOG = logging.getLogger("tiktok_downloader_bot")
@@ -139,7 +156,7 @@ class MediaDownloader:
     ) -> Iterator[DownloadedMedia]:
         job_dir = Path(tempfile.mkdtemp(prefix="job-", dir=self.config.download_dir))
         try:
-            download_url = self.resolve_tiktok_url(url)
+            download_url = normalize_twitter_url(self.resolve_tiktok_url(url))
             if is_tiktok_photo_url(download_url):
                 if audio_only:
                     media = self.download_tiktok_sound(download_url, job_dir)
@@ -204,6 +221,16 @@ class MediaDownloader:
                         return self.download_tiktok_photo_post(download_url, job_dir)
                     except Exception as fallback_exc:
                         LOG.debug("TikTok fallback failed for %s: %s", download_url, fallback_exc)
+                if is_twitter_url(download_url) and not audio_only and not fallback_attempted and not isinstance(exc, TooLargeError):
+                    # Photo-only tweets have no video, so yt-dlp can never download them.
+                    fallback_attempted = True
+                    try:
+                        return self.download_twitter_photos(download_url, job_dir)
+                    except Exception as photo_exc:
+                        LOG.debug("Twitter photo fallback failed for %s: %s", download_url, photo_exc)
+                        if is_no_video_error(exc):
+                            # More yt-dlp format strategies cannot help a tweet without video.
+                            raise RuntimeError(f"{exc}; photo fallback: {photo_exc}") from photo_exc
 
         failure_summary = "; ".join(failures[-3:])
         if errors and all(isinstance(error, TooLargeError) for error in errors):
@@ -542,6 +569,64 @@ class MediaDownloader:
             for chunk in response.iter_content(chunk_size=1024 * 256):
                 if chunk:
                     handle.write(chunk)
+        return path
+
+    def fetch_json(self, url: str, *, params: dict[str, str] | None = None) -> Any:
+        response = self.session.get(url, params=params, headers=API_HEADERS, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
+    def fetch_tweet(self, twid: str, url: str) -> TweetPost:
+        """Tweet text and photos, from Twitter's syndication endpoint or else FxTwitter."""
+        errors: list[str] = []
+        try:
+            post = parse_syndication(
+                self.fetch_json(SYNDICATION_URL, params={"id": twid, "token": syndication_token(twid)})
+            )
+            if post:
+                return post
+            errors.append("syndication: no tweet data")
+        except (requests.RequestException, ValueError) as exc:
+            errors.append(f"syndication: {exc}")
+
+        screen_name = twitter_screen_name(url) or "i"
+        try:
+            post = parse_fxtwitter(self.fetch_json(f"{FXTWITTER_API}/{screen_name}/status/{twid}"))
+            if post:
+                return post
+            errors.append("fxtwitter: no tweet data")
+        except (requests.RequestException, ValueError) as exc:
+            errors.append(f"fxtwitter: {exc}")
+        raise RuntimeError(f"Could not read the tweet ({'; '.join(errors)})")
+
+    def download_twitter_photos(self, url: str, job_dir: Path) -> DownloadedMedia:
+        twid = twitter_status_id(url)
+        if not twid:
+            raise RuntimeError("This is not a tweet link")
+        post = self.fetch_tweet(twid, url)
+        if not post.photo_urls:
+            raise RuntimeError("Tweet did not expose any photos")
+
+        paths = tuple(
+            self.download_twitter_image(photo_url, job_dir, index=index)
+            for index, photo_url in enumerate(post.photo_urls, start=1)
+        )
+        return DownloadedMedia(paths=paths, title=post.text, uploader=post.author, webpage_url=url)
+
+    def download_twitter_image(self, url: str, job_dir: Path, *, index: int) -> Path:
+        """Download a photo in original size, or in 'large' if the original is too big for Telegram."""
+        path = job_dir / f"tweet-photo-{index:03d}.jpg"
+        for size in ("orig", "large"):
+            response = self.session.get(original_photo_url(url, size=size), headers=IMAGE_HEADERS, stream=True, timeout=60)
+            response.raise_for_status()
+            extension = extension_from_response(url, response.headers.get("Content-Type"))
+            path = job_dir / f"tweet-photo-{index:03d}{extension}"
+            with path.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=1024 * 256):
+                    if chunk:
+                        handle.write(chunk)
+            if path.stat().st_size <= TELEGRAM_PHOTO_MAX_BYTES:
+                break
         return path
 
     def download_tiktok_sound(self, url: str, job_dir: Path) -> DownloadedMedia:
