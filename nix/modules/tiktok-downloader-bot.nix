@@ -2,7 +2,7 @@
 { config, lib, pkgs, ... }:
 
 let
-  cfg = config.services.telegram-automation-bot;
+  cfg = config.services.tiktok-downloader-bot;
   inherit (lib) mkEnableOption mkIf mkOption optional types;
   system = pkgs.stdenv.hostPlatform.system;
   envList =
@@ -15,6 +15,10 @@ let
       "YTDLP_FORMAT=${cfg.ytdlpFormat}"
       "YTDLP_NO_PLAYLIST=${if cfg.ytdlpNoPlaylist then "true" else "false"}"
       "AUTHORIZED_USER=${lib.concatMapStringsSep "," toString cfg.authorizedUsers}"
+      "ADMIN_USER=${lib.concatMapStringsSep "," toString cfg.adminUsers}"
+      "BOT_MAX_WORKERS=${toString cfg.maxWorkers}"
+      "BOT_USER_CONCURRENCY=${toString cfg.userConcurrency}"
+      "BOT_MAX_LINKS=${toString cfg.maxLinksPerMessage}"
     ]
     ++ optional (cfg.tokenFile != null) "BOT_TOKEN_FILE=${cfg.tokenFile}"
     ++ optional (cfg.token != null) "BOT_TOKEN=${cfg.token}"
@@ -24,14 +28,21 @@ let
     ++ lib.mapAttrsToList (name: value: "${name}=${value}") cfg.extraEnvironment;
 in
 {
-  options.services.telegram-automation-bot = {
-    enable = mkEnableOption "Telegram automation bot";
+  imports = [
+    # The package used to be called telegram-automation-bot; keep old configurations working.
+    (lib.mkRenamedOptionModule
+      [ "services" "telegram-automation-bot" ]
+      [ "services" "tiktok-downloader-bot" ])
+  ];
+
+  options.services.tiktok-downloader-bot = {
+    enable = mkEnableOption "TikTok downloader Telegram bot";
 
     package = mkOption {
       type = types.package;
       default = self.packages.${system}.default;
       defaultText = "self.packages.\${system}.default";
-      description = "Package that provides the telegram-automation-bot executable.";
+      description = "Package that provides the tiktok-downloader-bot executable.";
     };
 
     tokenFile = mkOption {
@@ -54,7 +65,7 @@ in
 
     workDir = mkOption {
       type = types.str;
-      default = "/var/lib/telegram-automation-bot";
+      default = "/var/lib/tiktok-downloader-bot";
       description = "Mutable bot state directory. This must not point into /nix/store.";
     };
 
@@ -67,13 +78,37 @@ in
     cacheChatId = mkOption {
       type = types.nullOr types.str;
       default = null;
-      description = "Telegram chat ID used to cache guest-mode downloads and obtain file_ids.";
+      description = "Optional private chat/channel the bot can post to. Needed only for inline mode: the bot uploads files there once to obtain reusable Telegram file_ids.";
     };
 
     authorizedUsers = mkOption {
       type = types.listOf types.int;
       default = [ ];
       description = "Optional Telegram user IDs allowed to use normal bot commands. Empty means public.";
+    };
+
+    adminUsers = mkOption {
+      type = types.listOf types.int;
+      default = [ ];
+      description = "Telegram user IDs that may use /stats and receive notifications about unexpected errors.";
+    };
+
+    maxWorkers = mkOption {
+      type = types.ints.positive;
+      default = 4;
+      description = "How many downloads may run at the same time.";
+    };
+
+    userConcurrency = mkOption {
+      type = types.ints.positive;
+      default = 2;
+      description = "How many of those downloads one user may have running at once; the rest wait in a queue.";
+    };
+
+    maxLinksPerMessage = mkOption {
+      type = types.ints.positive;
+      default = 3;
+      description = "How many links of a single message are downloaded.";
     };
 
     botApiBase = mkOption {
@@ -120,13 +155,13 @@ in
 
     user = mkOption {
       type = types.str;
-      default = "telegram-automation-bot";
+      default = "tiktok-downloader-bot";
       description = "System user that runs the bot.";
     };
 
     group = mkOption {
       type = types.str;
-      default = "telegram-automation-bot";
+      default = "tiktok-downloader-bot";
       description = "System group that runs the bot.";
     };
 
@@ -141,15 +176,15 @@ in
     assertions = [
       {
         assertion = !(lib.hasPrefix "/nix/store/" cfg.workDir);
-        message = "services.telegram-automation-bot.workDir must be mutable and cannot be in /nix/store.";
+        message = "services.tiktok-downloader-bot.workDir must be mutable and cannot be in /nix/store.";
       }
       {
         assertion = !(lib.hasPrefix "/nix/store/" cfg.downloadDir);
-        message = "services.telegram-automation-bot.downloadDir must be mutable and cannot be in /nix/store.";
+        message = "services.tiktok-downloader-bot.downloadDir must be mutable and cannot be in /nix/store.";
       }
       {
         assertion = cfg.token != null || cfg.tokenFile != null || cfg.environmentFile != null;
-        message = "Set services.telegram-automation-bot.tokenFile, token, or environmentFile with BOT_TOKEN.";
+        message = "Set services.tiktok-downloader-bot.tokenFile, token, or environmentFile with BOT_TOKEN.";
       }
     ];
 
@@ -165,8 +200,8 @@ in
       "d ${cfg.downloadDir} 0750 ${cfg.user} ${cfg.group} - -"
     ];
 
-    systemd.services.telegram-automation-bot = {
-      description = "Telegram automation bot";
+    systemd.services.tiktok-downloader-bot = {
+      description = "TikTok downloader Telegram bot";
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
@@ -182,7 +217,7 @@ in
         envList);
 
       serviceConfig = {
-        ExecStart = "${cfg.package}/bin/telegram-automation-bot";
+        ExecStart = "${cfg.package}/bin/tiktok-downloader-bot";
         User = cfg.user;
         Group = cfg.group;
         WorkingDirectory = cfg.workDir;

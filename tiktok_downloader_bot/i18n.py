@@ -1,0 +1,262 @@
+"""User-facing strings. The language is picked from the sender's Telegram language_code."""
+
+from __future__ import annotations
+
+DEFAULT_LANG = "en"
+
+STRINGS: dict[str, dict[str, str]] = {
+    "en": {
+        "help": (
+            "Send me a link to a video, photo post or audio and I will download it.\n"
+            "Supported: TikTok, YouTube, Instagram, X/Twitter, Reddit, Twitch, Vimeo, SoundCloud and more.\n"
+            "\n"
+            "• YouTube: pick a quality (or MP3) with the buttons.\n"
+            "• Videos and TikTok photo posts get a 🎵 Sound button. The sound is only sent if you press it.\n"
+            "• /audio <link> – download only the sound.\n"
+            "• /settings – captions, default quality, auto-download in groups and more."
+        ),
+        "help_inline": "• Inline: type @{bot} <link> in any chat.",
+        "cmd_start": "Show the welcome message",
+        "cmd_help": "How to use the bot",
+        "cmd_settings": "Chat settings",
+        "cmd_audio": "Download only the sound of a link",
+        "not_authorized": "You are not authorized to use this bot.",
+        "unknown_command": "Unknown command. Send a supported media-platform URL to download it.",
+        "usage_audio": "Usage: /audio <link>, or reply to a message that contains a link with /audio.",
+        "usage_dl": "Usage: /dl <link>, or reply to a message that contains a link with /dl.",
+        "busy": "You already have too many downloads in progress. Please wait for them to finish.",
+        "downloading": "Downloading…",
+        "progress": "Downloading… {detail}",
+        "processing": "Processing…",
+        "canceled": "Download canceled.",
+        "choose_quality": "Choose quality:",
+        "quality_auto": "Auto (best that fits)",
+        "quality_audio": "🎵 Audio only (MP3)",
+        "btn_retry": "Retry",
+        "btn_quality": "Quality",
+        "btn_cancel": "Cancel",
+        "btn_sound": "🎵 Sound",
+        "cb_retrying": "Retrying…",
+        "cb_choose_quality": "Choose quality.",
+        "cb_downloading_quality": "Downloading {label}…",
+        "cb_unknown_quality": "Unknown quality choice.",
+        "cb_unknown_action": "Unknown download action.",
+        "cb_expired": "This download expired.",
+        "cb_only_requester": "Only the requester can use this download.",
+        "cb_canceled": "Canceled.",
+        "cb_saved": "Saved.",
+        "sound_prompt": "🎵 Want the sound of this post?",
+        "sound_sending": "Getting the sound…",
+        "sound_busy": "The sound is already on its way.",
+        "sound_failed": "Could not get the sound: {reason}",
+        "album_fallback": "Album upload failed; sent the items one by one.",
+        "settings_title": "Settings for this chat",
+        "settings_hint": "Tap a button to change it.",
+        "settings_admin_only": "Only chat admins can change the settings.",
+        "set_captions": "Captions",
+        "set_sound": "Sound button",
+        "set_auto": "Auto-download links",
+        "set_delete_original": "Delete the link message",
+        "set_reply": "Reply to the link message",
+        "set_quality": "Default quality",
+        "on": "on",
+        "off": "off",
+        "quality_ask": "ask each time",
+        "quality_best": "best that fits",
+        "quality_audio_only": "audio only",
+        "err_too_large": "The file is too large for Telegram upload.",
+        "err_telegram": "Telegram upload failed.",
+        "err_timeout": "Network timeout while downloading media.",
+        "err_unavailable": "Media is unavailable or private.",
+        "err_bot_check": "The source asked for a sign-in or bot check. The bot's admin needs to provide cookies.",
+        "err_age": "This media is age-restricted and needs a signed-in account.",
+        "err_geo": "This media is not available in the bot's region.",
+        "err_rate_limit": "The source is rate-limiting the bot right now. Try again in a few minutes.",
+        "err_unsupported": "This link is not supported.",
+        "err_no_media": "Could not find downloadable media metadata.",
+        "err_no_sound": "This post has no downloadable sound.",
+        "err_generic": "Download failed.",
+        "inline_download_title": "Download",
+        "inline_downloading": "Downloading…",
+        "inline_album": "This post has {count} items. Albums cannot be sent inline – send the link to the bot directly.",
+        "inline_failed": "Download failed: {reason}",
+        "inline_unconfigured_title": "Inline mode is not set up",
+        "inline_unconfigured": "The bot admin needs to set TELEGRAM_CACHE_CHAT_ID to enable inline mode.",
+        "inline_unauthorized_title": "Not authorized",
+    },
+    "ru": {
+        "help": (
+            "Отправьте ссылку на видео, пост с фото или аудио, и я скачаю его.\n"
+            "Поддерживаются: TikTok, YouTube, Instagram, X/Twitter, Reddit, Twitch, Vimeo, SoundCloud и другие.\n"
+            "\n"
+            "• YouTube: выберите качество (или MP3) кнопками.\n"
+            "• У видео и фото-постов TikTok есть кнопка 🎵 Звук. Звук отправляется только по нажатию.\n"
+            "• /audio <ссылка> – скачать только звук.\n"
+            "• /settings – подписи, качество по умолчанию, автозагрузка в группах и другое."
+        ),
+        "help_inline": "• Инлайн: напишите @{bot} <ссылка> в любом чате.",
+        "cmd_start": "Приветствие",
+        "cmd_help": "Как пользоваться ботом",
+        "cmd_settings": "Настройки чата",
+        "cmd_audio": "Скачать только звук по ссылке",
+        "not_authorized": "У вас нет доступа к этому боту.",
+        "unknown_command": "Неизвестная команда. Отправьте ссылку на поддерживаемую платформу, чтобы скачать медиа.",
+        "usage_audio": "Использование: /audio <ссылка> или ответьте командой /audio на сообщение со ссылкой.",
+        "usage_dl": "Использование: /dl <ссылка> или ответьте командой /dl на сообщение со ссылкой.",
+        "busy": "У вас уже слишком много загрузок. Дождитесь их завершения.",
+        "downloading": "Скачиваю…",
+        "progress": "Скачиваю… {detail}",
+        "processing": "Обрабатываю…",
+        "canceled": "Загрузка отменена.",
+        "choose_quality": "Выберите качество:",
+        "quality_auto": "Авто (лучшее из подходящих)",
+        "quality_audio": "🎵 Только звук (MP3)",
+        "btn_retry": "Повторить",
+        "btn_quality": "Качество",
+        "btn_cancel": "Отмена",
+        "btn_sound": "🎵 Звук",
+        "cb_retrying": "Повторяю…",
+        "cb_choose_quality": "Выберите качество.",
+        "cb_downloading_quality": "Скачиваю {label}…",
+        "cb_unknown_quality": "Неизвестный вариант качества.",
+        "cb_unknown_action": "Неизвестное действие.",
+        "cb_expired": "Срок действия этой загрузки истёк.",
+        "cb_only_requester": "Только автор запроса может использовать эту кнопку.",
+        "cb_canceled": "Отменено.",
+        "cb_saved": "Сохранено.",
+        "sound_prompt": "🎵 Нужен звук из этого поста?",
+        "sound_sending": "Получаю звук…",
+        "sound_busy": "Звук уже отправляется.",
+        "sound_failed": "Не удалось получить звук: {reason}",
+        "album_fallback": "Не удалось отправить альбом; отправил файлы по одному.",
+        "settings_title": "Настройки этого чата",
+        "settings_hint": "Нажмите на кнопку, чтобы изменить.",
+        "settings_admin_only": "Менять настройки могут только администраторы чата.",
+        "set_captions": "Подписи",
+        "set_sound": "Кнопка звука",
+        "set_auto": "Автозагрузка ссылок",
+        "set_delete_original": "Удалять сообщение со ссылкой",
+        "set_reply": "Отвечать на сообщение со ссылкой",
+        "set_quality": "Качество по умолчанию",
+        "on": "вкл",
+        "off": "выкл",
+        "quality_ask": "спрашивать",
+        "quality_best": "лучшее из подходящих",
+        "quality_audio_only": "только звук",
+        "err_too_large": "Файл слишком большой для загрузки в Telegram.",
+        "err_telegram": "Не удалось загрузить файл в Telegram.",
+        "err_timeout": "Тайм-аут сети при скачивании.",
+        "err_unavailable": "Медиа недоступно или приватное.",
+        "err_bot_check": "Источник требует вход в аккаунт или проверку на бота. Администратору бота нужно добавить cookies.",
+        "err_age": "Это медиа с возрастным ограничением, нужен вход в аккаунт.",
+        "err_geo": "Это медиа недоступно в регионе бота.",
+        "err_rate_limit": "Источник временно ограничивает запросы бота. Попробуйте через несколько минут.",
+        "err_unsupported": "Эта ссылка не поддерживается.",
+        "err_no_media": "Не удалось найти медиа для скачивания.",
+        "err_no_sound": "У этого поста нет звука для скачивания.",
+        "err_generic": "Не удалось скачать.",
+        "inline_download_title": "Скачать",
+        "inline_downloading": "Скачиваю…",
+        "inline_album": "В этом посте {count} файлов. Альбомы нельзя отправить инлайн – отправьте ссылку боту напрямую.",
+        "inline_failed": "Не удалось скачать: {reason}",
+        "inline_unconfigured_title": "Инлайн-режим не настроен",
+        "inline_unconfigured": "Администратору бота нужно задать TELEGRAM_CACHE_CHAT_ID, чтобы включить инлайн-режим.",
+        "inline_unauthorized_title": "Нет доступа",
+    },
+    "uk": {
+        "help": (
+            "Надішліть посилання на відео, пост із фото або аудіо, і я завантажу його.\n"
+            "Підтримуються: TikTok, YouTube, Instagram, X/Twitter, Reddit, Twitch, Vimeo, SoundCloud та інші.\n"
+            "\n"
+            "• YouTube: оберіть якість (або MP3) кнопками.\n"
+            "• Відео та фото-пости TikTok мають кнопку 🎵 Звук. Звук надсилається лише після натискання.\n"
+            "• /audio <посилання> – завантажити лише звук.\n"
+            "• /settings – підписи, якість за замовчуванням, автозавантаження в групах тощо."
+        ),
+        "help_inline": "• Інлайн: напишіть @{bot} <посилання> у будь-якому чаті.",
+        "cmd_start": "Привітання",
+        "cmd_help": "Як користуватися ботом",
+        "cmd_settings": "Налаштування чату",
+        "cmd_audio": "Завантажити лише звук за посиланням",
+        "not_authorized": "У вас немає доступу до цього бота.",
+        "unknown_command": "Невідома команда. Надішліть посилання на підтримувану платформу, щоб завантажити медіа.",
+        "usage_audio": "Використання: /audio <посилання> або дайте відповідь командою /audio на повідомлення з посиланням.",
+        "usage_dl": "Використання: /dl <посилання> або дайте відповідь командою /dl на повідомлення з посиланням.",
+        "busy": "У вас уже забагато завантажень. Зачекайте, поки вони завершаться.",
+        "downloading": "Завантажую…",
+        "progress": "Завантажую… {detail}",
+        "processing": "Обробляю…",
+        "canceled": "Завантаження скасовано.",
+        "choose_quality": "Оберіть якість:",
+        "quality_auto": "Авто (найкраще з доступних)",
+        "quality_audio": "🎵 Лише звук (MP3)",
+        "btn_retry": "Повторити",
+        "btn_quality": "Якість",
+        "btn_cancel": "Скасувати",
+        "btn_sound": "🎵 Звук",
+        "cb_retrying": "Повторюю…",
+        "cb_choose_quality": "Оберіть якість.",
+        "cb_downloading_quality": "Завантажую {label}…",
+        "cb_unknown_quality": "Невідомий варіант якості.",
+        "cb_unknown_action": "Невідома дія.",
+        "cb_expired": "Термін дії цього завантаження минув.",
+        "cb_only_requester": "Лише автор запиту може користуватися цією кнопкою.",
+        "cb_canceled": "Скасовано.",
+        "cb_saved": "Збережено.",
+        "sound_prompt": "🎵 Потрібен звук із цього поста?",
+        "sound_sending": "Отримую звук…",
+        "sound_busy": "Звук уже надсилається.",
+        "sound_failed": "Не вдалося отримати звук: {reason}",
+        "album_fallback": "Не вдалося надіслати альбом; надіслав файли по одному.",
+        "settings_title": "Налаштування цього чату",
+        "settings_hint": "Натисніть кнопку, щоб змінити.",
+        "settings_admin_only": "Змінювати налаштування можуть лише адміністратори чату.",
+        "set_captions": "Підписи",
+        "set_sound": "Кнопка звуку",
+        "set_auto": "Автозавантаження посилань",
+        "set_delete_original": "Видаляти повідомлення з посиланням",
+        "set_reply": "Відповідати на повідомлення з посиланням",
+        "set_quality": "Якість за замовчуванням",
+        "on": "увімк",
+        "off": "вимк",
+        "quality_ask": "питати",
+        "quality_best": "найкраще з доступних",
+        "quality_audio_only": "лише звук",
+        "err_too_large": "Файл завеликий для завантаження в Telegram.",
+        "err_telegram": "Не вдалося завантажити файл у Telegram.",
+        "err_timeout": "Тайм-аут мережі під час завантаження.",
+        "err_unavailable": "Медіа недоступне або приватне.",
+        "err_bot_check": "Джерело вимагає вхід в обліковий запис або перевірку на бота. Адміністратору бота потрібно додати cookies.",
+        "err_age": "Це медіа з віковим обмеженням, потрібен вхід в обліковий запис.",
+        "err_geo": "Це медіа недоступне в регіоні бота.",
+        "err_rate_limit": "Джерело тимчасово обмежує запити бота. Спробуйте за кілька хвилин.",
+        "err_unsupported": "Це посилання не підтримується.",
+        "err_no_media": "Не вдалося знайти медіа для завантаження.",
+        "err_no_sound": "У цього поста немає звуку для завантаження.",
+        "err_generic": "Не вдалося завантажити.",
+        "inline_download_title": "Завантажити",
+        "inline_downloading": "Завантажую…",
+        "inline_album": "У цьому пості {count} файлів. Альбоми не можна надіслати інлайн – надішліть посилання боту напряму.",
+        "inline_failed": "Не вдалося завантажити: {reason}",
+        "inline_unconfigured_title": "Інлайн-режим не налаштовано",
+        "inline_unconfigured": "Адміністратору бота потрібно задати TELEGRAM_CACHE_CHAT_ID, щоб увімкнути інлайн-режим.",
+        "inline_unauthorized_title": "Немає доступу",
+    },
+}
+
+
+def normalize_lang(code: str | None) -> str:
+    """Map a Telegram language_code such as ``ru-RU`` to a supported language."""
+    if not code:
+        return DEFAULT_LANG
+    base = code.lower().replace("_", "-").split("-", maxsplit=1)[0]
+    if base == "ua":
+        base = "uk"
+    if base in {"be", "kk"}:  # closest supported language for these audiences
+        base = "ru"
+    return base if base in STRINGS else DEFAULT_LANG
+
+
+def tr(lang: str, key: str, **kwargs: object) -> str:
+    template = STRINGS.get(lang, {}).get(key) or STRINGS[DEFAULT_LANG][key]
+    return template.format(**kwargs) if kwargs else template

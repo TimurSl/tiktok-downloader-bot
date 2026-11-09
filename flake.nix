@@ -1,5 +1,5 @@
 {
-  description = "Telegram media downloader bot with guest mode";
+  description = "Telegram bot that downloads TikTok, YouTube, Instagram and other media";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -18,9 +18,9 @@
           python = pkgs.python3;
         in
         {
-          telegram-automation-bot = python.pkgs.buildPythonApplication {
-            pname = "telegram-automation-bot";
-            version = "1.0.0";
+          tiktok-downloader-bot = python.pkgs.buildPythonApplication {
+            pname = "tiktok-downloader-bot";
+            version = "2.0.0";
             pyproject = true;
 
             src = pkgs.lib.cleanSource ./.;
@@ -35,22 +35,24 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
 
             postInstall = ''
-              wrapProgram $out/bin/telegram-automation-bot \
+              wrapProgram $out/bin/tiktok-downloader-bot \
                 --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.ffmpeg ]}
             '';
 
-            pythonImportsCheck = [ "telegram_automation_bot" ];
+            pythonImportsCheck = [ "tiktok_downloader_bot" ];
+
+            meta.mainProgram = "tiktok-downloader-bot";
           };
 
-          default = self.packages.${system}.telegram-automation-bot;
+          default = self.packages.${system}.tiktok-downloader-bot;
         });
 
       apps = forAllSystems (system: {
-        telegram-automation-bot = {
+        tiktok-downloader-bot = {
           type = "app";
-          program = "${self.packages.${system}.telegram-automation-bot}/bin/telegram-automation-bot";
+          program = "${self.packages.${system}.tiktok-downloader-bot}/bin/tiktok-downloader-bot";
         };
-        default = self.apps.${system}.telegram-automation-bot;
+        default = self.apps.${system}.tiktok-downloader-bot;
       });
 
       devShells = forAllSystems (system:
@@ -74,7 +76,7 @@
 
       formatter = forAllSystems (system: (pkgsFor system).nixpkgs-fmt);
 
-      nixosModules.default = import ./nix/modules/telegram-automation-bot.nix { inherit self; };
-      nixosModules.telegram-automation-bot = self.nixosModules.default;
+      nixosModules.default = import ./nix/modules/tiktok-downloader-bot.nix { inherit self; };
+      nixosModules.tiktok-downloader-bot = self.nixosModules.default;
     };
 }
